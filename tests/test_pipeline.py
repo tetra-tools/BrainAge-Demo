@@ -20,7 +20,7 @@ def test_bundle_manifest_and_checksums(bundle_dir):
     m = b.manifest
     assert m["model"]["channel_number"] == 8
     assert m["model"]["onnx_parity_max_abs_diff_years"] < 1e-2
-    assert m["preprocessing"]["registration"] == "antsRegistrationSyNQuick[a]"
+    assert m["preprocessing"]["registration"] == "antsRegistrationSyNQuick.sh -t a"
     assert set(m["files"]) == {"model.onnx", "t1_landmarks.npy", "template.nii.gz", "brain_mask.nii"}
     assert cli(["info", "--bundle", str(bundle_dir)]) == 0
 
@@ -83,7 +83,7 @@ def test_full_pipeline_on_raw_scan(assets, bundle_dir, tmp_path):
                        save_preprocessed_dir=tmp_path / "pp")
     assert res.status == "ok" and np.isfinite(res.predicted_age)
     assert res.brain_age_gap == pytest.approx(res.predicted_age - 60, abs=1e-3)
-    assert res.steps[:2] == ["n4_bias_correction", "registration:antsRegistrationSyNQuick[a]"]
+    assert res.steps[:2] == ["n4_bias_correction", "registration:antsRegistrationSyNQuick.sh -t a"]
 
     # registration quality: the registered scan must overlap the template
     reg = nib.load(res.saved_files["registered"]).get_fdata()
@@ -165,3 +165,20 @@ def test_batch_qc_outputs_do_not_collide(assets, bundle_dir, tmp_path):
                             save_preprocessed_dir=tmp_path / "qc", fail_fast=True)
     files = [f for r in res for f in r.saved_files.values()]
     assert len(set(files)) == 4 and all(Path(f).is_file() for f in files)
+
+
+def test_registration_command_matches_conversion_script():
+    """Flags of `antsRegistrationSyNQuick.sh -d 3 -t a`, as used to build the training derivatives."""
+    from brainage.preprocessing import syn_quick_affine_args
+
+    args = syn_quick_affine_args("F", "M", "out_", "W", "IW")
+    flags = dict(zip(args[::2], args[1::2]))  # last occurrence wins for repeated stage flags
+    assert flags["--winsorize-image-intensities"] == "[0.005,0.995]"
+    assert flags["--use-histogram-matching"] == "0"
+    assert flags["--initial-moving-transform"] == "[F,M,1]"
+    assert flags["--interpolation"] == "Linear"
+    assert [args[i + 1] for i, a in enumerate(args) if a == "--transform"] == ["Rigid[0.1]", "Affine[0.1]"]
+    assert [args[i + 1] for i, a in enumerate(args) if a == "--metric"] == ["MI[F,M,1,32,Regular,0.25]"] * 2
+    assert [args[i + 1] for i, a in enumerate(args) if a == "--convergence"] == ["[1000x500x250x0,1e-6,10]"] * 2
+    assert flags["--random-seed"] == "123"
+    assert not any(a.startswith("SyN") for a in args)

@@ -127,7 +127,7 @@ class ModelBundle:
             landmarks_path=self.landmarks_path,
             mask_threshold=float(pp.get("mask_threshold", C.MASK_THRESHOLD)),
             registration_transform=pp.get("registration", C.REGISTRATION_TRANSFORM),
-            registration_seed=int(pp.get("registration_seed", C.REGISTRATION_RANDOM_SEED)),
+            registration_seed=pp.get("registration_seed", C.REGISTRATION_RANDOM_SEED),
             target_shape=tuple(pp.get("target_shape", C.TARGET_SHAPE)),
             rescale_percentiles=tuple(pp.get("rescale_percentiles", C.RESCALE_PERCENTILES)),
             n4_shrink_factor=int(n4.get("shrink_factor", C.N4_SHRINK_FACTOR)),

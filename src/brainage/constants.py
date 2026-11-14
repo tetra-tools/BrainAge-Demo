@@ -17,12 +17,17 @@ RESCALE_PERCENTILES = (0.5, 99.5)
 # brain = ScalarImage('ravg152T1_1mm_defaced.nii').data > .1
 MASK_THRESHOLD = 0.1
 
-# Training images were "space-avg152T1_desc-biascorr": N4-corrected, then
-# rigid + affine registered to avg152T1 1 mm (no non-linear warp).
-REGISTRATION_TRANSFORM = "antsRegistrationSyNQuick[a]"
+# Training images were "space-avg152T1_desc-biascorr", produced by the BIDS conversion scripts:
+#   N4BiasFieldCorrection -d 3 -s 4 -b [100] -c [50x50x50x50,0.0] -i raw -o biascorr
+#   antsRegistrationSyNQuick.sh -d 3 -f avg152T1 -m biascorr -t a      (rigid + affine, no SyN)
+# This value selects an exact re-implementation of that registration command; any other value
+# is passed to ants.registration(type_of_transform=...).
+REGISTRATION_TRANSFORM = "antsRegistrationSyNQuick.sh -t a"
+# Fixed sampling seed. With a single ITK thread the registration is then bit-reproducible; with
+# several threads it varies slightly from run to run (as did the original multi-threaded script).
 REGISTRATION_RANDOM_SEED = 123
 
-# N4 parameters (same as predict_image_sfcn.py in the source repo)
+# N4 parameters: identical to the conversion scripts (-s 4 -b [100] -c [50x50x50x50,0.0], no mask)
 N4_SHRINK_FACTOR = 4
 N4_CONVERGENCE = {"iters": [50, 50, 50, 50], "tol": 0.0}
 N4_SPLINE_PARAM = 100

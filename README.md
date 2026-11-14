@@ -9,7 +9,8 @@ training code of [`RS-JYC-HK-T1wMNIBrainAgeRegression`](https://github.com/tetra
 ```
 raw T1w .nii(.gz)
   └─ N4 bias-field correction ............ ANTsPy
-  └─ rigid + affine registration ......... ANTsPy → avg152T1 1 mm (182×218×182)
+  └─ rigid + affine registration ......... ANTsPy, same stages as antsRegistrationSyNQuick.sh -t a
+                                           → avg152T1 1 mm (182×218×182)
   └─ intensity rescale (p0.5–p99.5 → 0–1)  TorchIO  ┐
   └─ histogram standardisation ........... TorchIO  │ identical to training
   └─ brain mask ........................... TorchIO  │ (generate_ptfiles.py),
@@ -139,7 +140,7 @@ brainage archive BUNDLE_DIR [-o FILE]
 | `--save-preprocessed` | writes `<stem>_space-template_desc-biascorr_T1w.nii.gz` (after N4 + registration) and `<stem>_desc-modelinput_T1w.nii.gz` (exact network input) for QC. `<stem>` = `subject_id`, else the file name without `_T1w`; inputs with the same name in one batch are prefixed with their parent folder, so nothing is overwritten |
 | `--skip-bias-correction` | input already N4-corrected |
 | `--skip-registration` | input already in the template grid (182×218×182, avg152T1 1 mm); otherwise an explicit error is raised |
-| `--threads` | threads for ANTs, torch and ONNX Runtime |
+| `--threads` | threads for ANTs, torch and ONNX Runtime. `--threads 1` makes the registration bit-reproducible (fixed seed, ~2.5× slower); with more threads the registered image varies slightly between runs, as with the original `antsRegistrationSyNQuick.sh -n 16` |
 | `--no-verify` | skip bundle checksum verification (faster start) |
 | `--fail-fast` | stop at the first error instead of reporting it and continuing |
 
@@ -159,7 +160,9 @@ Exit codes: `0` all images OK, `1` at least one image failed, `2` configuration 
 * Registration failures are not silently ignored (unlike the original script): the image is reported
   as `status=error`. Use `--save-preprocessed` to visually check registrations.
 * Runtime on CPU (4 threads, measured on synthetic 1.1 mm scans): ~25 s N4 + ~25 s registration
-  + < 5 s for the rest.
+  + < 5 s for the rest. With `--threads 1` (reproducible), registration takes ~65 s.
+* In the Python API, set `num_threads` (or `ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS`) before ANTs is
+  first used in the process: ITK fixes its thread count at first use.
 
 ## 6. Development
 

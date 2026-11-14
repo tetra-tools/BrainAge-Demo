@@ -159,7 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--skip-bias-correction", action="store_true", help="input is already N4-corrected")
     pr.add_argument("--skip-registration", action="store_true",
                     help="input is already rigid/affine registered to the bundle template (same grid)")
-    pr.add_argument("--threads", type=int, help="CPU threads for ANTs / torch / ONNX Runtime")
+    pr.add_argument("--threads", type=int,
+                    help="CPU threads for ANTs / torch / ONNX Runtime; --threads 1 makes the registration "
+                         "bit-reproducible (about 2.5x slower)")
     pr.add_argument("--cpu", action="store_true", help="force CPUExecutionProvider")
     pr.add_argument("--providers", nargs="+", help="explicit ONNX Runtime providers")
     pr.add_argument("--no-verify", action="store_true", help="skip bundle checksum verification")

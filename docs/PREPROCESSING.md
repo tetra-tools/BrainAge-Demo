@@ -2,13 +2,21 @@
 
 Source of truth for training: `generate_ptfiles.py` in
 [`RS-JYC-HK-T1wMNIBrainAgeRegression`](https://github.com/tetra-tools/RS-JYC-HK-T1wMNIBrainAgeRegression).
-Training read BIDS derivatives `space-avg152T1_desc-biascorr` (bias-corrected, rigid + affine
-registered to avg152T1 1 mm), then applied the TorchIO chain below and cached tensors as float16.
+Training read BIDS derivatives `space-avg152T1_desc-biascorr`, produced by the dataset conversion
+scripts (e.g. the A4 → BIDS script) with two ANTs command-line calls:
+
+```bash
+N4BiasFieldCorrection -d 3 -v 1 -s 4 -b [100] -c [50x50x50x50,0.0] -i raw.nii.gz -o space-native_desc-biascorr.nii.gz
+antsRegistrationSyNQuick.sh -d 3 -f <avg152T1 template> -m space-native_desc-biascorr.nii.gz -o prefix_ -n 16 -t a
+# prefix_Warped.nii.gz -> space-avg152T1_desc-biascorr.nii.gz
+```
+
+then applied the TorchIO chain below and cached tensors as float16.
 
 | # | Step | Training | `brainage` (production) |
 |---|---|---|---|
-| 1 | Bias field correction | done upstream (`desc-biascorr`) | ANTsPy N4: shrink 4, 4×50 iterations, spline 100 mm. `--skip-bias-correction` if already done |
-| 2 | Registration to avg152T1 1 mm | done upstream, **rigid + affine** (`apply_syn_to_shap.py`: *"Resolve the rigid+affine t1_path"*) | ANTsPy `antsRegistrationSyNQuick[a]` (rigid + affine), seed 123. `--skip-registration` if already in template grid |
+| 1 | Bias field correction | `N4BiasFieldCorrection -s 4 -b [100] -c [50x50x50x50,0.0]`, no mask | ANTsPy N4 with the same parameters (no mask = whole image). `--skip-bias-correction` if already done |
+| 2 | Registration to avg152T1 1 mm | `antsRegistrationSyNQuick.sh -t a` (rigid + affine, MI, winsorize [0.005,0.995], linear interpolation) | the same `antsRegistration` stages called in process through ANTsPy (`syn_quick_affine_args`); only `--float 1` instead of the script's double precision. `--skip-registration` if already in template grid |
 | 3 | Read NIfTI | `tio.ScalarImage(path)` | registered image written to a temp NIfTI and read with `tio.ScalarImage` (same code path) |
 | 4 | NaN/Inf → 0 | `clean_image_data` | identical |
 | 5 | Intensity rescale | `RescaleIntensity((0, 1), percentiles=(0.5, 99.5))` | identical |
@@ -39,13 +47,22 @@ The existing single-image script of the training repo does not reproduce the tra
    cluster paths, preprocessing silently continuing when N4 or the registration fails, preprocessed
    image saved with an identity affine.
 
-## To confirm with the authors of the upstream derivatives
+## Remaining differences with the conversion scripts
 
-The `desc-biascorr` / `space-avg152T1` files were produced outside this repository. The defaults
-(N4 before registration, `antsRegistrationSyNQuick[a]`, template `ravg152T1_1mm.nii`) are the best
-reconstruction from the code; if the upstream pipeline used other settings (e.g. FSL FLIRT 12 dof,
-different N4 parameters, another template file), set them in the bundle `manifest.json`
-(`preprocessing.registration`, `preprocessing.n4`) — no code change needed for ANTsPy transforms.
+* **Determinism**: a fixed `--random-seed 123` is always passed. With `--threads 1` the registration
+  is bit-reproducible; with several threads (like the script's `-n 16`, which had no seed either) the
+  registered image varies slightly between runs (≈1 % mean relative intensity difference on the
+  synthetic test scan).
+* **Precision**: the script runs `antsRegistration` in double precision (`--float 0`); ANTsPy passes
+  images in memory as float, so the optimisation runs in single precision. Expected effect: sub-voxel.
+* **ANTs version**: the derivatives were produced with the cluster's ANTs (`module load ants`, version
+  recorded by `get_ants_version()` in the conversion log); the image ships the ANTs bundled in
+  `antspyx==0.6.3`. Same algorithms, possibly different defaults across major versions.
+* **Template file**: the script takes it from `--fixed`. The bundle must contain that exact file
+  (most likely `/ix1/hkarim/team/references/ravg152T1_1mm.nii`, the template also used by the SHAP
+  warps) – check the `--fixed` argument in the conversion job scripts before exporting.
+* The script's `--mask` argument is not used by the registration; masking happens only in the
+  TorchIO chain (step 7), which the bundle reproduces.
 
 **Recommended validation before release**: take ~50 test-split subjects, run
 `brainage predict` on their *raw* T1w, and compare with the ages predicted from the training cache

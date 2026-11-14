@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -57,6 +58,50 @@ def _stem(path: Path) -> str:
     return path.stem
 
 
+def syn_quick_affine_args(fixed: str, moving: str, outprefix: str, warped: str, inverse_warped: str,
+                          random_seed: Optional[int] = C.REGISTRATION_RANDOM_SEED) -> List[str]:
+    """``antsRegistration`` arguments of ``antsRegistrationSyNQuick.sh -d 3 -t a`` (rigid + affine).
+
+    This is the command that produced the training derivatives (``space-avg152T1_desc-biascorr``,
+    BIDS conversion scripts). ``ants.registration(type_of_transform="antsRegistrationSyNQuick[a]")``
+    omits ``--winsorize-image-intensities``, hence this explicit version. Only ``--float 1``
+    differs from the script (which runs in double precision): ANTsPy passes float images in memory.
+    ``--random-seed`` is added so that runs with one ITK thread are bit-reproducible.
+    """
+    linear = "MI[%s,%s,1,32,Regular,0.25]" % (fixed, moving)
+    stage = ["--convergence", "[1000x500x250x0,1e-6,10]", "--shrink-factors", "8x4x2x1",
+             "--smoothing-sigmas", "3x2x1x0vox"]
+    return [
+        "--dimensionality", "3",
+        "--float", "1",
+        "--collapse-output-transforms", "1",
+        "--output", "[%s,%s,%s]" % (outprefix, warped, inverse_warped),
+        "--interpolation", "Linear",
+        "--use-histogram-matching", "0",
+        "--winsorize-image-intensities", "[0.005,0.995]",
+        "--initial-moving-transform", "[%s,%s,1]" % (fixed, moving),
+        "--transform", "Rigid[0.1]", "--metric", linear, *stage,
+        "--transform", "Affine[0.1]", "--metric", linear, *stage,
+    ] + ([] if random_seed is None else ["--random-seed", str(int(random_seed))])
+
+
+def _syn_quick_affine(fixed_img, moving_img, random_seed: Optional[int] = C.REGISTRATION_RANDOM_SEED):
+    from ants.internal import get_lib_fn, get_pointer_string, process_arguments
+
+    fixed = fixed_img.clone("float")
+    moving = moving_img.clone("float")
+    warped = fixed.clone()          # receives the moving image resampled on the template grid
+    inverse_warped = moving.clone()
+    with tempfile.TemporaryDirectory(prefix="brainage_reg_") as tmp:
+        args = syn_quick_affine_args(get_pointer_string(fixed), get_pointer_string(moving),
+                                     str(Path(tmp) / "reg_"), get_pointer_string(warped),
+                                     get_pointer_string(inverse_warped), random_seed=random_seed)
+        code = get_lib_fn("antsRegistration")(process_arguments(args))
+    if code != 0:
+        raise PreprocessingError(f"antsRegistration failed with exit code {code}")
+    return warped
+
+
 def default_output_stem(path: Path) -> str:
     """File stem used for QC outputs: ``sub-01_ses-1_T1w.nii.gz`` -> ``sub-01_ses-1``."""
     stem = _stem(path)
@@ -79,7 +124,7 @@ class Preprocessor:
         landmarks_path: str | Path,
         mask_threshold: float = C.MASK_THRESHOLD,
         registration_transform: str = C.REGISTRATION_TRANSFORM,
-        registration_seed: int = C.REGISTRATION_RANDOM_SEED,
+        registration_seed: Optional[int] = C.REGISTRATION_RANDOM_SEED,
         target_shape: Sequence[int] = C.TARGET_SHAPE,
         rescale_percentiles: Tuple[float, float] = C.RESCALE_PERCENTILES,
         n4_shrink_factor: int = C.N4_SHRINK_FACTOR,
@@ -106,7 +151,10 @@ class Preprocessor:
         self.fp16_roundtrip = fp16_roundtrip
 
         if num_threads:
-            # Read by ITK (ANTs) at each filter call
+            # ITK reads this once, when ANTs first runs a filter: it must be set before that.
+            if "ants" in sys.modules and os.environ.get("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS") != str(num_threads):
+                log.warning("ANTs is already loaded: num_threads=%s may not apply to N4/registration. "
+                            "Set ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS before importing ants.", num_threads)
             os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(num_threads)
             torch.set_num_threads(num_threads)
 
@@ -150,15 +198,13 @@ class Preprocessor:
         )
 
     def register(self, image):
+        """Register ``image`` to the template and return it resampled on the template grid."""
         import ants
-        result = ants.registration(
-            fixed=self.template,
-            moving=image,
-            type_of_transform=self.registration_transform,
-            random_seed=self.registration_seed,
-            verbose=False,
-        )
-        return result["warpedmovout"]
+        if self.registration_transform == C.REGISTRATION_TRANSFORM:
+            return _syn_quick_affine(self.template, image, random_seed=self.registration_seed)
+        # any other value: an ANTsPy type_of_transform (e.g. "Affine", "antsRegistrationSyNQuick[a]")
+        return ants.registration(fixed=self.template, moving=image,
+                                 type_of_transform=self.registration_transform, verbose=False)["warpedmovout"]
 
     # ------------------------------------------------------------- pipeline
     def _check_grid(self, t1, source: Path) -> None:
