@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+# model bundles and checkpoints are never committed: they are published as release assets
+dist/
+model/
+*.ckpt
+*.onnx
+*.onnx.data
+*.npy
+*.nii
+*.nii.gz
+results/

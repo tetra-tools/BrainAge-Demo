@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brainage"
+version = "0.1.0"
+description = "Production brain-age inference from raw T1w MRI (N4 + rigid/affine MNI registration + SFCN, ONNX runtime)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "tetra-tools" }]
+dependencies = [
+    "numpy>=1.26",
+    "nibabel>=5.2",
+    "torch>=2.2",            # required by torchio (CPU wheel is enough)
+    "torchio==0.20.18",      # pinned: same version as training (RS-JYC-HK-T1wMNIBrainAgeRegression)
+    "antspyx>=0.5.3",
+    # ONNX Runtime is selected with an extra: `brainage[cpu]` OR `brainage[gpu]`, never both
+    # (onnxruntime and onnxruntime-gpu ship the same `onnxruntime` package and overwrite each other).
+]
+
+[project.optional-dependencies]
+cpu = ["onnxruntime>=1.18"]
+gpu = ["onnxruntime-gpu>=1.18"]
+# Needed only to convert a Lightning checkpoint (.ckpt) into a model bundle
+export = ["onnx>=1.16", "onnxscript>=0.3"]
+dev = ["pytest>=8", "onnx>=1.16", "onnxscript>=0.3"]
+
+[project.scripts]
+brainage = "brainage.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: runs ANTs registration (a few minutes on CPU)"]

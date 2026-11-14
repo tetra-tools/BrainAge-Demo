@@ -1,0 +1,10 @@
+# Pinned runtime dependencies of the Docker image (torch is installed separately, CPU wheel).
+# torchio and nibabel are the versions used to build the training cache.
+numpy==2.3.5
+nibabel==5.3.2
+torchio==0.20.18
+antspyx==0.6.3
+onnxruntime==1.32.0
+# export command (Lightning checkpoint -> ONNX bundle)
+onnx==1.23.2
+onnxscript==0.7.2

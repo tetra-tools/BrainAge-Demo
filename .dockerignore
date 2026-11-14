@@ -1,0 +1,14 @@
+.git
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+*.egg-info
+.venv
+venv
+tests
+notebooks
+results
+data
+# bundles are only sent to the daemon when building --target bundled with BUNDLE_DIR=dist/...
+dist/*.tar.gz
+dist/*.sha256
