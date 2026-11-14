@@ -44,7 +44,7 @@ partially downloaded bundle is rejected.
 ## Creating the bundle (on the cluster, where the checkpoint lives)
 
 ```bash
-pip install "brainage[export] @ git+https://github.com/tetra-tools/BrainAge-Demo"
+pip install "brainage[cpu,export] @ git+https://github.com/tetra-tools/BrainAge-Demo"
 brainage export \
   --checkpoint /ix1/hkarim/users/jpc211/projects/RS-JYC-HK-T1wMNIBrainAgeRegression/checkpoints/sfcn/lossmae_h32_lr0.04_batch16_dr0.4/model_best_score.ckpt \
   --landmarks  /ix1/hkarim/users/jpc211/projects/RS-JYC-HK-T1wMNIBrainAgeRegression/cached_data/t1_landmarks.npy \

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .bundle import ModelBundle
 from .inference import OnnxAgePredictor
-from .preprocessing import Preprocessor
+from .preprocessing import Preprocessor, default_output_stem
 
 log = logging.getLogger(__name__)
 
@@ -54,13 +56,21 @@ class BrainAgePipeline:
     def predict(self, image_path: str | Path, chronological_age: Optional[float] = None,
                 subject_id: Optional[str] = None, skip_bias_correction: bool = False,
                 skip_registration: bool = False,
-                save_preprocessed_dir: Optional[str | Path] = None) -> PredictionResult:
-        """Predict the brain age of one image. Raises on failure (see ``predict_many`` for batch-safe use)."""
+                save_preprocessed_dir: Optional[str | Path] = None,
+                output_stem: Optional[str] = None) -> PredictionResult:
+        """Predict the brain age of one image. Raises on failure (see ``predict_many`` for batch-safe use).
+
+        ``output_stem`` names the QC files written to ``save_preprocessed_dir`` (default: subject_id,
+        else the input file name).
+        """
         t_start = time.perf_counter()
         pre = self.preprocessor.run(image_path, skip_bias_correction=skip_bias_correction,
-                                    skip_registration=skip_registration, save_dir=save_preprocessed_dir)
+                                    skip_registration=skip_registration, save_dir=save_preprocessed_dir,
+                                    output_stem=output_stem or subject_id)
         t0 = time.perf_counter()
         age = float(self.predictor.predict(pre.tensor)[0])
+        if not math.isfinite(age):
+            raise RuntimeError(f"The model returned a non-finite age ({age}) for {image_path}")
         timings = dict(pre.timings, inference=time.perf_counter() - t0, total=time.perf_counter() - t_start)
 
         res = PredictionResult(
@@ -84,10 +94,12 @@ class BrainAgePipeline:
         ids = list(subject_ids) if subject_ids is not None else [None] * len(paths)
         if not (len(ages) == len(ids) == len(paths)):
             raise ValueError("image_paths, chronological_ages and subject_ids must have the same length")
+        stems = unique_output_stems(paths, ids)
         results = []
-        for path, age, sid in zip(paths, ages, ids):
+        for path, age, sid, stem in zip(paths, ages, ids, stems):
             try:
-                results.append(self.predict(path, chronological_age=age, subject_id=sid, **kwargs))
+                results.append(self.predict(path, chronological_age=age, subject_id=sid,
+                                            output_stem=stem, **kwargs))
             except Exception as e:  # noqa: BLE001 - one bad scan must not stop a batch
                 if fail_fast:
                     raise
@@ -96,3 +108,21 @@ class BrainAgePipeline:
                                                 status="error", error=f"{type(e).__name__}: {e}",
                                                 model_name=self.bundle.name, model_version=self.bundle.version))
         return results
+
+
+def unique_output_stems(paths: List[str | Path], subject_ids: List[Optional[str]]) -> List[str]:
+    """One distinct QC file stem per input, so a batch never overwrites its own outputs.
+
+    Default stem: subject_id, else the file name. Inputs sharing a stem (e.g. ``a/T1w.nii.gz`` and
+    ``b/T1w.nii.gz``) are prefixed with their parent folder, then numbered if still ambiguous.
+    """
+    stems = [sid or default_output_stem(Path(p)) for p, sid in zip(paths, subject_ids)]
+    counts = Counter(stems)
+    stems = [f"{Path(p).parent.name}_{s}" if counts[s] > 1 else s for p, s in zip(paths, stems)]
+    counts, seen, out = Counter(stems), Counter(), []
+    for s in stems:
+        if counts[s] > 1:
+            seen[s] += 1
+            s = f"{s}_{seen[s]}"
+        out.append(s)
+    return out

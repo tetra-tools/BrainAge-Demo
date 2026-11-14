@@ -57,6 +57,12 @@ def _stem(path: Path) -> str:
     return path.stem
 
 
+def default_output_stem(path: Path) -> str:
+    """File stem used for QC outputs: ``sub-01_ses-1_T1w.nii.gz`` -> ``sub-01_ses-1``."""
+    stem = _stem(path)
+    return stem[:-4] if stem.endswith("_T1w") else stem
+
+
 @dataclass
 class PreprocessedImage:
     tensor: np.ndarray                      # (1, 1, 160, 192, 160) float32
@@ -171,6 +177,7 @@ class Preprocessor:
         skip_bias_correction: bool = False,
         skip_registration: bool = False,
         save_dir: Optional[str | Path] = None,
+        output_stem: Optional[str] = None,
     ) -> PreprocessedImage:
         import ants
         import torchio as tio
@@ -224,8 +231,7 @@ class Preprocessor:
         if save_dir is not None:
             save_dir = Path(save_dir)
             save_dir.mkdir(parents=True, exist_ok=True)
-            stem = _stem(image_path)
-            stem = stem[:-4] if stem.endswith("_T1w") else stem  # BIDS: keep entities, re-add suffix
+            stem = output_stem or default_output_stem(image_path)
             registered = save_dir / f"{stem}_space-template_desc-biascorr_T1w.nii.gz"
             ants.image_write(img, str(registered))
             model_input = save_dir / f"{stem}_desc-modelinput_T1w.nii.gz"

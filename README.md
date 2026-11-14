@@ -77,8 +77,8 @@ Notes:
 * Singularity/Apptainer (HPC): `apptainer build brainage.sif docker-daemon://brainage:0.1.0`, then
   `apptainer run -B models/brainage-sfcn-1.0.0:/opt/brainage/model brainage.sif predict ...`.
 * The image is CPU-only: preprocessing (N4 + registration, ~1 min) dominates and is CPU-bound,
-  SFCN inference takes a few seconds on CPU. For GPU inference, install `brainage[gpu]` on a CUDA
-  base image; ONNX Runtime picks `CUDAExecutionProvider` automatically.
+  SFCN inference takes a few seconds on CPU. For GPU inference, install `brainage[gpu]` (instead of
+  `onnxruntime`) on a CUDA base image; ONNX Runtime picks `CUDAExecutionProvider` automatically.
 * Building behind a proxy without access to `download.pytorch.org`: add
   `--build-arg TORCH_INDEX_URL=https://pypi.org/simple` (larger CUDA wheel, same behaviour).
 
@@ -88,8 +88,10 @@ Install (Python ≥ 3.10):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu    # CPU torch, optional but lighter
-pip install "brainage @ git+https://github.com/tetra-tools/BrainAge-Demo"
-# + checkpoint export tools: pip install "brainage[export] @ git+https://github.com/tetra-tools/BrainAge-Demo"
+pip install "brainage[cpu] @ git+https://github.com/tetra-tools/BrainAge-Demo"     # ONNX Runtime CPU
+# or, on a CUDA machine (never both: the two packages overwrite each other):
+# pip install "brainage[gpu] @ git+https://github.com/tetra-tools/BrainAge-Demo"
+# + checkpoint export tools: pip install "brainage[cpu,export] @ git+https://github.com/tetra-tools/BrainAge-Demo"
 ```
 
 Use:
@@ -134,7 +136,7 @@ brainage archive BUNDLE_DIR [-o FILE]
 | `--age` | chronological age for a single input → `brain_age_gap = predicted − chronological` |
 | `--bundle` | bundle folder; default `$BRAINAGE_BUNDLE`, then `/opt/brainage/model` |
 | `-o/--output` | `.tsv`, `.csv` (one row per image) or `.json` (full details incl. timings) |
-| `--save-preprocessed` | writes `<stem>_space-template_desc-biascorr_T1w.nii.gz` (after N4 + registration) and `<stem>_desc-modelinput_T1w.nii.gz` (exact network input) for QC |
+| `--save-preprocessed` | writes `<stem>_space-template_desc-biascorr_T1w.nii.gz` (after N4 + registration) and `<stem>_desc-modelinput_T1w.nii.gz` (exact network input) for QC. `<stem>` = `subject_id`, else the file name without `_T1w`; inputs with the same name in one batch are prefixed with their parent folder, so nothing is overwritten |
 | `--skip-bias-correction` | input already N4-corrected |
 | `--skip-registration` | input already in the template grid (182×218×182, avg152T1 1 mm); otherwise an explicit error is raised |
 | `--threads` | threads for ANTs, torch and ONNX Runtime |
@@ -162,7 +164,7 @@ Exit codes: `0` all images OK, `1` at least one image failed, `2` configuration 
 ## 6. Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[cpu,dev]"
 pytest -m "not slow"      # ~20 s: bundle, checksums, ONNX parity, bit-exact preprocessing vs training
 pytest                    # + full raw-scan pipeline with N4 and registration (~2 min)
 ```

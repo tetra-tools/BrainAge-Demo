@@ -15,7 +15,11 @@ log = logging.getLogger(__name__)
 class OnnxAgePredictor:
     def __init__(self, model_path: str | Path, providers: Optional[Sequence[str]] = None,
                  num_threads: Optional[int] = None):
-        import onnxruntime as ort
+        try:
+            import onnxruntime as ort
+        except ImportError as e:
+            raise RuntimeError("ONNX Runtime is not installed: install `brainage[cpu]` (onnxruntime) "
+                               "or `brainage[gpu]` (onnxruntime-gpu), not both") from e
 
         available = ort.get_available_providers()
         if providers is None:

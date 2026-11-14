@@ -1,5 +1,6 @@
 import json
 import shutil
+from pathlib import Path
 
 import nibabel as nib
 import numpy as np
@@ -115,3 +116,52 @@ def test_cli_batch_with_list_and_error_isolation(assets, bundle_dir, tmp_path):
                 "--skip-registration", "--skip-bias-correction", "--age", "40", "-o", str(tsv)]) == 0
     header, row = tsv.read_text().strip().split("\n")
     assert header.split("\t")[:3] == ["subject_id", "input_path", "predicted_age"]
+
+
+# ------------------------------------------------------------ review fixes
+def test_manifest_must_checksum_every_asset(bundle_dir, tmp_path):
+    copy = tmp_path / "b"
+    shutil.copytree(bundle_dir, copy)
+    manifest = json.loads((copy / "manifest.json").read_text())
+    del manifest["files"]["t1_landmarks.npy"]
+    (copy / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(BundleError, match="no checksum"):
+        ModelBundle.load(copy)
+    manifest["files"] = {}
+    (copy / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(BundleError, match="no checksum"):
+        ModelBundle.load(copy, verify=False)
+
+
+def test_export_rejects_non_finite_model(assets, tmp_path):
+    from brainage.export import export_bundle
+
+    ckpt = torch.load(assets["checkpoint"], weights_only=False)
+    ckpt["state_dict"]["classifier.4.bias"] = torch.tensor([float("nan")])
+    bad = tmp_path / "nan.ckpt"
+    torch.save(ckpt, bad)
+    out = tmp_path / "bundle"
+    with pytest.raises(RuntimeError, match="NaN"):
+        export_bundle(bad, assets["landmarks"], assets["template"], assets["mask"], out, version="0.0.0")
+    assert not out.exists()  # no half-written bundle left behind
+
+
+def test_unique_output_stems():
+    from brainage.pipeline import unique_output_stems
+
+    paths = ["/d/a/T1w.nii.gz", "/d/b/T1w.nii.gz", "/d/sub-01_T1w.nii.gz", "/x/a/T1w.nii", "/d/c.nii.gz"]
+    stems = unique_output_stems(paths, [None, None, None, None, "sub-09"])
+    assert stems == ["a_T1w_1", "b_T1w", "sub-01", "a_T1w_2", "sub-09"]
+    assert len(set(stems)) == len(stems)
+
+
+def test_batch_qc_outputs_do_not_collide(assets, bundle_dir, tmp_path):
+    for sub in ("a", "b"):
+        (tmp_path / sub).mkdir()
+        shutil.copy(assets["in_space"], tmp_path / sub / "T1w.nii.gz")
+    pipe = BrainAgePipeline(bundle_dir, providers=["CPUExecutionProvider"])
+    res = pipe.predict_many([tmp_path / "a" / "T1w.nii.gz", tmp_path / "b" / "T1w.nii.gz"],
+                            skip_bias_correction=True, skip_registration=True,
+                            save_preprocessed_dir=tmp_path / "qc", fail_fast=True)
+    files = [f for r in res for f in r.saved_files.values()]
+    assert len(set(files)) == 4 and all(Path(f).is_file() for f in files)

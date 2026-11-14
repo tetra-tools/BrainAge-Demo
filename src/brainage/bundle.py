@@ -63,7 +63,19 @@ class ModelBundle:
         return bundle
 
     def _check_files(self, verify: bool) -> None:
-        for rel, expected in self.manifest.get("files", {}).items():
+        files = self.manifest.get("files")
+        if not isinstance(files, dict):
+            raise BundleError("manifest.files must map every bundle file to its sha256")
+        try:
+            referenced = [self.manifest["model"]["file"]] + [
+                self.preprocessing[k] for k in ("landmarks", "template", "brain_mask")]
+        except KeyError as e:
+            raise BundleError(f"manifest is missing the entry {e}") from e
+        unlisted = [rel for rel in referenced if rel not in files]
+        if unlisted:
+            raise BundleError(f"manifest.files has no checksum for {unlisted}: every model and "
+                              "preprocessing asset must be checksummed")
+        for rel, expected in files.items():
             p = self.root / rel
             if not p.is_file():
                 raise BundleError(f"Bundle file missing: {p}")

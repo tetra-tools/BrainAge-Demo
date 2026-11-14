@@ -101,9 +101,11 @@ def _populate_bundle(checkpoint: Path, landmarks: Path, template: Path, mask: Pa
     with torch.no_grad():
         ref = model(torch.from_numpy(x)).double().numpy()
     got = OnnxAgePredictor(onnx_path, providers=["CPUExecutionProvider"]).predict(x)
+    if not (np.isfinite(ref).all() and np.isfinite(got).all()):
+        raise RuntimeError("The model outputs NaN/Inf (non-finite weights in the checkpoint?): bundle not written")
     max_diff = float(np.max(np.abs(ref - got)))
     log.info("Parity torch vs ONNX: max |diff| = %.2e years", max_diff)
-    if max_diff > parity_tolerance:
+    if not np.isfinite(max_diff) or max_diff > parity_tolerance:
         raise RuntimeError(f"ONNX output differs from PyTorch by {max_diff:.3g} years")
 
     # 3. preprocessing assets
