@@ -37,9 +37,12 @@ def _db_list(frame: pd.DataFrame) -> str:
     return "; ".join(f"{db} ({n:,})" for db, n in counts.items())
 
 
-def _split_counts(frame: pd.DataFrame) -> dict:
+SPLIT_ORDER = (aio.SPLIT_TRAIN, *aio.SPLITS)
+
+
+def _split_counts(frame: pd.DataFrame, splits) -> dict:
     out = {}
-    for split in aio.SPLITS:
+    for split in splits:
         f = frame[frame["_split"] == split]
         out[f"scans {split}"] = len(f)
         out[f"participants {split}"] = f["_subject"].nunique()
@@ -48,19 +51,20 @@ def _split_counts(frame: pd.DataFrame) -> dict:
 
 def database_table(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for (split, db), f in df.groupby(["_split", aio.COL_DATABASE], sort=True):
+    for (split, db), f in df.groupby(["_split", aio.COL_DATABASE], sort=True, dropna=False):   # missing labels kept
         healthy = f[aio.COL_HEALTHY] == 1
-        rows.append({"split": split, "database": db, "scans": len(f),
+        age = pd.to_numeric(f[aio.COL_AGE], errors="coerce")
+        rows.append({"split": split, "database": MISSING if pd.isna(db) else db, "scans": len(f),
                      "participants": f["_subject"].nunique(),
                      "healthy scans (healthy == 1)": int(healthy.sum()),
                      "other scans": int((~healthy).sum()),
-                     "age min": f[aio.COL_AGE].min(), "age max": f[aio.COL_AGE].max()})
+                     "age min": age.min(), "age max": age.max()})
     out = pd.DataFrame(rows)
-    order = {s: i for i, s in enumerate(aio.SPLITS)}
+    order = {s: i for i, s in enumerate(SPLIT_ORDER)}
     return out.sort_values(["split", "database"], key=lambda c: c.map(order) if c.name == "split" else c)
 
 
-def raw_diagnosis_table(df: pd.DataFrame) -> pd.DataFrame:
+def raw_diagnosis_table(df: pd.DataFrame, splits) -> pd.DataFrame:
     rows = []
     for domain, col in DX_COLUMNS.items():
         key = df[col].where(df[col].notna(), MISSING).astype(str)
@@ -69,7 +73,7 @@ def raw_diagnosis_table(df: pd.DataFrame) -> pd.DataFrame:
             groups, is_cn = dg.string_groups(original, domain)
             rows.append({"domain": dg.DOMAINS[domain], "raw value": value,
                          "scans": len(f), "participants": f["_subject"].nunique(),
-                         **_split_counts(f),
+                         **_split_counts(f, splits),
                          "healthy == 1 scans": int((f[aio.COL_HEALTHY] == 1).sum()),
                          "groups (notebook rules)": " + ".join(groups) if groups else "",
                          "CN flag": is_cn,
@@ -79,7 +83,7 @@ def raw_diagnosis_table(df: pd.DataFrame) -> pd.DataFrame:
             .reset_index(drop=True))
 
 
-def token_table(df: pd.DataFrame) -> pd.DataFrame:
+def token_table(df: pd.DataFrame, splits) -> pd.DataFrame:
     rows = []
     for domain, col in DX_COLUMNS.items():
         tok = df[[col, "_subject", "_split", aio.COL_DATABASE]].copy()
@@ -89,12 +93,12 @@ def token_table(df: pd.DataFrame) -> pd.DataFrame:
             rule, groups = dg.token_rule(token, domain)
             rows.append({"domain": dg.DOMAINS[domain], "token": token, "rule": rule, "group": groups,
                          "scans": len(f), "participants": f["_subject"].nunique(),
-                         **_split_counts(f), "databases": _db_list(f)})
+                         **_split_counts(f, splits), "databases": _db_list(f)})
     return (pd.DataFrame(rows).sort_values(["domain", "rule", "scans"], ascending=[True, True, False])
             .reset_index(drop=True))
 
 
-def group_table(df: pd.DataFrame) -> pd.DataFrame:
+def group_table(df: pd.DataFrame, splits) -> pd.DataFrame:
     rows = []
     for domain, col in DX_COLUMNS.items():
         res = df[col].map(lambda v: dg.string_groups(None if pd.isna(v) else v, domain))
@@ -108,11 +112,11 @@ def group_table(df: pd.DataFrame) -> pd.DataFrame:
                 labels.append(["none (no group, not CN)"])
         g = df[["_subject", "_split", aio.COL_DATABASE, aio.COL_HEALTHY]].assign(group=labels).explode("group")
         for group, f in g.groupby("group", sort=False):
-            rows.append({"domain": dg.DOMAINS[domain], "group": group, **_split_counts(f),
+            rows.append({"domain": dg.DOMAINS[domain], "group": group, **_split_counts(f, splits),
                          "healthy == 1 scans": int((f[aio.COL_HEALTHY] == 1).sum()),
                          "databases": _db_list(f)})
     out = pd.DataFrame(rows)
-    out["_total"] = out[[f"scans {s}" for s in aio.SPLITS]].sum(axis=1)
+    out["_total"] = out[[f"scans {s}" for s in splits]].sum(axis=1)
     return (out.sort_values(["domain", "_total"], ascending=[True, False])
             .drop(columns="_total").reset_index(drop=True))
 
@@ -124,6 +128,8 @@ def parse_args(argv=None):
                                      f"(default: <repo>/{aio.DEFAULT_OUT_DIR})")
     p.add_argument("--model-tag", default=aio.DEFAULT_MODEL_TAG,
                    help="model part of the TSV file names (default: %(default)s)")
+    p.add_argument("--train-file", help="training-set table (default: <pred-dir>/predictions_train_<tag>.tsv if present)")
+    p.add_argument("--no-train", action="store_true", help="do not add the training set")
     return p.parse_args(argv)
 
 
@@ -133,8 +139,11 @@ def main(argv=None) -> int:
     out = aio.resolve_dir(args.out_dir, aio.DEFAULT_OUT_DIR) / "inventory"
     out.mkdir(parents=True, exist_ok=True)
     notes: List[str] = []
+    train_file = aio.training_file(pred_dir, args.model_tag, args.train_file, args.no_train, notes)
     try:
         raw = aio.read_all(pred_dir, args.model_tag, notes)
+        if train_file is not None:
+            raw = pd.concat([raw, aio.read_training(train_file, notes)], ignore_index=True)
         df = aio.native_scans(raw, notes)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -145,11 +154,12 @@ def main(argv=None) -> int:
     accounting = aio.scan_accounting(raw, df)
     accounting.to_csv(out / "scan_accounting.csv", index=False)
 
+    splits = [s for s in SPLIT_ORDER if (df["_split"] == s).any()]
     tables = {
         "databases": database_table(df),
-        "diagnoses_raw": raw_diagnosis_table(df),
-        "diagnosis_tokens": token_table(df),
-        "diagnosis_groups": group_table(df),
+        "diagnoses_raw": raw_diagnosis_table(df, splits),
+        "diagnosis_tokens": token_table(df, splits),
+        "diagnosis_groups": group_table(df, splits),
     }
     titles = {
         "databases": "Databases (native original scans, all participants)",

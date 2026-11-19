@@ -613,14 +613,7 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     notes: List[str] = []
 
-    train_file = None
-    if args.train_file:
-        train_file = Path(args.train_file)
-    elif not args.no_train:
-        candidate = pred_dir / aio.TRAIN_FILE_TEMPLATE.format(tag=args.model_tag)
-        if candidate.is_file():
-            train_file = candidate
-            notes.append(f"Training set added automatically from {candidate.name} (use --no-train to leave it out).")
+    train_file = aio.training_file(pred_dir, args.model_tag, args.train_file, args.no_train, notes)
     try:
         raw, native, pop, allrows = load_population(pred_dir, args.model_tag, train_file, notes)
         errors, warnings = aio.audit_labels(raw, native)
@@ -658,7 +651,7 @@ def main(argv=None) -> int:
     header = ("# Brain-age statistics (healthy participants, native scans)\n\n"
               "Population per split: augmentation == native & is_original, healthy == 1; chronological age "
               "floored to whole years. Test = hyperparameter selection; External validation = Cam-CAN + OASIS-3 "
-              "(main result)" + ("; Training = training set (--train-file), for comparison" if TRAIN in stats else "")
+              "(main result)" + ("; Training = training set, for comparison" if TRAIN in stats else "")
               + f". Scan-level statistics; 95% CIs: percentile bootstrap, {args.n_boot:,} resamples "
               f"of participants (seed {args.seed}). Age bands include their lower bound. "
               "Gap = predicted − chronological age.\n\n")
@@ -683,11 +676,13 @@ def main(argv=None) -> int:
     for gkey in groups:
         notes.append(f"{GROUP_LABELS[gkey]}: {stats[gkey]['N |gap|>15']:,} scan(s) with |gap| > {GAP_FLAG:g} "
                      "years (kept; listed in scans_abs_gap_gt15.csv).")
+    verdict = ("Every scan in the files has one native original row, every native scan is healthy == 0 or 1, and "
+               "every healthy native scan with a prediction is in exactly one group."
+               if not (errors or problems) else
+               "PROBLEMS FOUND (run without --no-strict to stop on them): see the ERROR lines below.")
     (out / "checks.md").write_text(
         "# Data checks\n\n## Scan accounting\n\n" + aio.markdown_table(accounting) + "\n\n"
-        "Every scan in the files has a native original row, every native scan is healthy == 0 or 1, and every "
-        "healthy native scan with a prediction is in exactly one group.\n\n## Notes\n\n"
-        + "\n".join(f"- {n}" for n in notes) + "\n")
+        + verdict + "\n\n## Notes\n\n" + "\n".join(f"- {n}" for n in notes) + "\n")
 
     print(f"Figure : {pdf}\n         {png}")
     for name in ("brainage_stats.md", "brainage_mae_by_subgroup.md", "brainage_text_snippets.md", "checks.md",

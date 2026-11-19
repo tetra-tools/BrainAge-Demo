@@ -195,8 +195,9 @@ def _mean_line(ax, curve: pd.DataFrame, color: str, lw: float = 2.0, label=None)
 
 def make_figure(d: pd.DataFrame, part: pd.DataFrame, curves: pd.DataFrame, out_dir: Path):
     plotted = part[part["group"].isin(GROUPS)]
-    traj = d[d["_subject"].isin(plotted["participant"])].merge(
-        plotted[["participant", "group"]], left_on="_subject", right_on="participant")
+    traj = (d[d["_subject"].isin(plotted["participant"])]
+            .merge(plotted[["participant", "group"]], left_on="_subject", right_on="participant")
+            .sort_values(["_subject", "_t", "_ses_num"], kind="stable"))          # each line in time order
     t_max = max(1.0, float(traj["_t"].max())) if len(traj) else 1.0
     y = np.concatenate([traj["_dpred"].to_numpy(float), [0.0, t_max]])
     y_lo, y_hi = np.floor(y.min() / 5) * 5, np.ceil(y.max() / 5) * 5

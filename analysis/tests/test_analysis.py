@@ -468,3 +468,36 @@ def test_conflicting_rows_for_one_scan_stop(tmp_path, capsys):
     assert _run(build_pred_dir(tmp_path, modify), tmp_path / "out") == 2
     err = capsys.readouterr().err
     assert "several native original rows" in err and "healthy" in err
+
+
+def test_inventory_keeps_missing_database_label_and_training(tmp_path):
+    def modify(split, source, df):
+        if split == "test" and source == "prediction_file":
+            df.loc[df["subject_id"] == df["subject_id"].iloc[0], "database"] = np.nan
+        return df
+    d = build_pred_dir(tmp_path, modify)
+    rng = np.random.default_rng(1)
+    pd.DataFrame(_rows(rng, "train", ["adni", "ppmi"], 30, True, 40_000)).to_csv(
+        d / aio.TRAIN_FILE_TEMPLATE.format(tag=TAG), sep="\t", index=False)
+    out = tmp_path / "o"
+    assert inv.main(["--pred-dir", str(d), "--out-dir", str(out)]) == 0
+    dbs = pd.read_csv(out / "inventory" / "databases.csv", keep_default_na=False)
+    assert "<missing>" in set(dbs["database"])                                   # not dropped by groupby
+    assert {"train", "test", "validation"} == set(dbs["split"])
+    assert "ppmi" in set(dbs.loc[dbs["split"] == "train", "database"])            # training-only database listed
+    acc = pd.read_csv(out / "inventory" / "scan_accounting.csv")
+    assert dbs["scans"].sum() == acc["native original scans"].sum()
+    assert inv.main(["--pred-dir", str(d), "--out-dir", str(tmp_path / "o2"), "--no-train"]) == 0
+    dbs2 = pd.read_csv(tmp_path / "o2" / "inventory" / "databases.csv", keep_default_na=False)
+    assert "train" not in set(dbs2["split"])
+
+
+def test_checks_md_does_not_claim_success_with_no_strict(tmp_path):
+    def modify(split, source, df):
+        if split == "test" and source == "healthy_file":
+            df.loc[_first_native(df, last=True), "augmentation"] = "Native"
+        return df
+    out = tmp_path / "out"
+    assert _run(build_pred_dir(tmp_path, modify), out, "--no-strict") == 0
+    text = (out / "checks.md").read_text()
+    assert "PROBLEMS FOUND" in text and "Every scan in the files has one native" not in text

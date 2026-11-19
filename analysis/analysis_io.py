@@ -132,6 +132,18 @@ def read_training(path: Path, notes: List[str]) -> pd.DataFrame:
     return df.assign(_source="training_file", _split=SPLIT_TRAIN)
 
 
+def training_file(pred_dir: Path, model_tag: str, explicit: Optional[str], disabled: bool,
+                  notes: List[str]) -> Optional[Path]:
+    """Training table to use: --train-file, else predictions_train_<tag>.tsv if present, unless --no-train."""
+    if explicit:
+        return Path(explicit)
+    candidate = pred_dir / TRAIN_FILE_TEMPLATE.format(tag=model_tag)
+    if not disabled and candidate.is_file():
+        notes.append(f"Training set added automatically from {candidate.name} (use --no-train to leave it out).")
+        return candidate
+    return None
+
+
 def native_scans(raw: pd.DataFrame, notes: List[str]) -> pd.DataFrame:
     """Forest-plot rows: native original scans, healthy + prediction files, drop_duplicates()."""
     out = []
@@ -178,6 +190,15 @@ def audit_labels(raw: pd.DataFrame, native: pd.DataFrame) -> Tuple[List[str], Li
         bad = raw.loc[num.isna() & raw[col].notna(), col]
         if len(bad):
             errors.append(f"'{col}': {len(bad):,} values are not numbers: {_examples(bad.unique())}.")
+
+    # identifiers must be present: a missing subject_id would merge different people
+    for col, is_error in ((COL_SUBJECT, True), (COL_DATABASE, False), (COL_SESSION, False)):
+        miss = raw[col].isna() | raw[col].astype(object).astype(str).str.strip().eq("")
+        if miss.any():
+            by_file = raw.loc[miss].groupby(["_split", "_source"]).size().to_dict()
+            msg = (f"'{col}': {int(miss.sum()):,} rows have no value (by split/file: {by_file}); they are keyed "
+                   f"as '{MISSING_ID}'" + (" and different people would be merged." if is_error else "."))
+            (errors if is_error else warnings).append(msg)
 
     # augmentation labels
     near = aug_txt.str.strip().str.lower().eq("native") & aug_txt.ne("native")
@@ -304,14 +325,23 @@ def scan_accounting(raw: pd.DataFrame, native: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+MISSING_ID = "<missing>"
+
+
+def _id(s: pd.Series) -> pd.Series:
+    # explicit label for missing values: astype(str) keeps NA with pandas 3, and NA keys are
+    # silently dropped by nunique()/groupby() (older pandas turn them all into "nan" instead)
+    return s.astype(object).where(s.notna(), MISSING_ID).astype(str)
+
+
 def subject_key(df: pd.DataFrame) -> pd.Series:
     """Participant identifier, unique across databases."""
-    return df[COL_DATABASE].astype(str) + "/" + df[COL_SUBJECT].astype(str)
+    return _id(df[COL_DATABASE]) + "/" + _id(df[COL_SUBJECT])
 
 
 def scan_key(df: pd.DataFrame) -> pd.Series:
     """Scan identifier (participant + session), unique within a split."""
-    return subject_key(df) + "/" + df[COL_SESSION].astype(str)
+    return subject_key(df) + "/" + _id(df[COL_SESSION])
 
 
 def markdown_table(df: pd.DataFrame, index_label: Optional[str] = None) -> str:
