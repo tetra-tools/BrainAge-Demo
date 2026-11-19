@@ -50,17 +50,24 @@ def _rows(rng, split, databases, n_subjects, healthy, start):
     return rows
 
 
-@pytest.fixture(scope="module")
-def pred_dir(tmp_path_factory):
-    d = tmp_path_factory.mktemp("predictions")
+def build_pred_dir(d: Path, modify=None, encoding: str = "utf-8") -> Path:
+    """Write the synthetic tables; ``modify(split, source, df) -> df`` injects a fault."""
     rng = np.random.default_rng(0)
     for split, dbs in (("test", ["adni", "ukb", "hcp"]), ("validation", ["camcan", "oasis3"])):
         healthy = pd.DataFrame(_rows(rng, split, dbs, 120, True, 0))
         clinical = pd.DataFrame(_rows(rng, split, dbs, 60, False, 10_000))
         clinical = pd.concat([clinical, healthy.iloc[:9]])          # identical rows in both files
-        healthy.to_csv(d / aio.FILE_TEMPLATES["healthy_file"].format(split=split, tag=TAG), sep="\t", index=False)
-        clinical.to_csv(d / aio.FILE_TEMPLATES["prediction_file"].format(split=split, tag=TAG), sep="\t", index=False)
+        for source, df in (("healthy_file", healthy), ("prediction_file", clinical)):
+            if modify is not None:
+                df = modify(split, source, df.copy())
+            path = d / aio.FILE_TEMPLATES[source].format(split=split, tag=TAG)
+            df.to_csv(path, sep="\t", index=False, encoding=encoding)
     return d
+
+
+@pytest.fixture(scope="module")
+def pred_dir(tmp_path_factory):
+    return build_pred_dir(tmp_path_factory.mktemp("predictions"))
 
 
 def test_figure_script(pred_dir, tmp_path):
@@ -84,7 +91,12 @@ def test_figure_script(pred_dir, tmp_path):
     sub = pd.read_csv(tmp_path / "brainage_mae_by_subgroup.csv")
     assert set(sub["factor"]) == {"age (years)", "sex", "augmentation"}
     aug = sub[(sub["factor"] == "augmentation") & (sub["group"] == "Test")]
-    assert set(aug["level"]) == {"native", "flip", "noise", "all rows (native + augmented)"}
+    filled_aug = aug[aug["N rows"] > 0]
+    assert set(filled_aug["level"]) == {"native", "contains Flip", "contains Noise", "all augmented rows",
+                                        "all rows (native + augmented)"}
+    n_aug = aug.set_index("level")["N rows"]
+    assert n_aug["contains Flip"] + n_aug["contains Noise"] == n_aug["all augmented rows"]
+    assert n_aug["native"] + n_aug["all augmented rows"] == n_aug["all rows (native + augmented)"]
     native_mae = aug.loc[aug["level"] == "native", "MAE"].item()
     overall = stats.query("group == 'Test' and statistic == 'MAE (years)'")["estimate"].item()
     assert native_mae == pytest.approx(overall)
@@ -163,3 +175,163 @@ def test_string_groups_matches_notebook_rules():
     assert dg.string_groups(None, "psych") == ([], False)
     assert dg.string_groups("Healthy", "psych") == ([], True)
     assert dg.string_groups("surgery", "psych") == ([], False)                 # excluded before "Pain"
+
+
+# ---------------------------------------------------------------- no scan lost to labelling or encoding
+def _stat(out: Path, group: str, statistic: str) -> float:
+    stats = pd.read_csv(out / "brainage_stats.csv")
+    return stats.query("group == @group and statistic == @statistic")["estimate"].item()
+
+
+def _run(pred_dir: Path, out: Path, *extra) -> int:
+    return fig.main(["--pred-dir", str(pred_dir), "--out-dir", str(out), "--n-boot", "50", *extra])
+
+
+def _first_native(df, database=None, last=False):
+    """Index of a healthy native row (``last``: one with no copy in the prediction file)."""
+    m = (df["augmentation"] == "native") & (df["healthy"] == 1)
+    if database:
+        m &= df["database"] == database
+    return df.index[m][-1 if last else 0]
+
+
+def test_accounting_every_scan(pred_dir, tmp_path):
+    assert _run(pred_dir, tmp_path) == 0
+    acc = pd.read_csv(tmp_path / "scan_accounting.csv").set_index("split")
+    assert (acc["scans in files"] == acc["native original scans"]).all()
+    assert (acc["healthy == 1"] + acc["healthy == 0"] == acc["native original scans"]).all()
+    assert _stat(tmp_path, "Test", "N scans") == acc.loc["test", "healthy, with prediction and age"]
+    ext = acc.loc["validation", "healthy, with prediction and age"]
+    assert _stat(tmp_path, "External validation", "N scans") == ext
+    assert _stat(tmp_path, "Cam-CAN", "N scans") + _stat(tmp_path, "OASIS-3", "N scans") == ext
+
+
+def test_numeric_ids_keep_leading_zeros(tmp_path):
+    def modify(split, source, df):
+        if split == "test":                     # two different adni participants: "007" and "7"
+            df.loc[df["subject_id"] == "sub-00000", "subject_id"] = "007"
+            df.loc[df["subject_id"] == "sub-00003", "subject_id"] = "7"
+        return df
+    out = tmp_path / "out"
+    assert _run(build_pred_dir(tmp_path, modify), out) == 0
+    assert _stat(out, "Test", "N participants") == 120
+
+
+@pytest.mark.parametrize("bad_value", [" native", "Native", "NATIVE", np.nan, ""])
+def test_native_label_variant_stops(tmp_path, capsys, bad_value):
+    def modify(split, source, df):
+        if split == "test" and source == "healthy_file":
+            df.loc[_first_native(df, last=True), "augmentation"] = bad_value
+        return df
+    d = build_pred_dir(tmp_path, modify)
+    assert _run(d, tmp_path / "out") == 2
+    err = capsys.readouterr().err
+    assert "no native original row" in err                                # the scan would be lost
+    assert ("instead of exactly 'native'" in err) or ("have no label" in err)   # and the cause is named
+    assert _run(d, tmp_path / "out2", "--no-strict") == 0               # reported, not hidden
+    assert "ERROR (reported only" in (tmp_path / "out2" / "checks.md").read_text()
+
+
+@pytest.mark.parametrize("bad_value", ["yes", np.nan])
+def test_is_original_not_boolean_stops(tmp_path, capsys, bad_value):
+    def modify(split, source, df):
+        if split == "validation" and source == "healthy_file":
+            df["is_original"] = df["is_original"].astype(object)
+            df.loc[_first_native(df), "is_original"] = bad_value
+        return df
+    assert _run(build_pred_dir(tmp_path, modify), tmp_path / "out") == 2
+    assert "is_original" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("encode", [lambda v: v.astype(float), lambda v: v.astype(bool)])
+def test_healthy_and_original_numeric_encodings_lose_nobody(pred_dir, tmp_path, encode):
+    def modify(split, source, df):
+        df["healthy"] = encode(df["healthy"])
+        df["is_original"] = df["is_original"].astype(int)
+        return df
+    out = tmp_path / "out"
+    assert _run(build_pred_dir(tmp_path, modify), out) == 0
+    assert _run(pred_dir, tmp_path / "ref") == 0
+    for g in ("Test", "External validation", "Cam-CAN", "OASIS-3"):
+        assert _stat(out, g, "N scans") == _stat(tmp_path / "ref", g, "N scans")
+
+
+@pytest.mark.parametrize("bad_value", ["yes", np.nan, 2])
+def test_healthy_unknown_stops(tmp_path, capsys, bad_value):
+    def modify(split, source, df):
+        if split == "test" and source == "prediction_file":
+            df["healthy"] = df["healthy"].astype(object)
+            df.loc[df.index[df["augmentation"] == "native"][-1], "healthy"] = bad_value
+        return df
+    assert _run(build_pred_dir(tmp_path, modify), tmp_path / "out") == 2
+    assert "healthy" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("label", ["CamCAN", "camcan ", "Cam-CAN"])
+def test_external_label_variant_stops(tmp_path, capsys, label):
+    def modify(split, source, df):
+        if split == "validation" and source == "healthy_file":
+            subj = df.loc[_first_native(df, "camcan"), "subject_id"]
+            df.loc[df["subject_id"] == subj, "database"] = label     # all rows of one participant
+        return df
+    assert _run(build_pred_dir(tmp_path, modify), tmp_path / "out") == 2
+    assert repr(label) in capsys.readouterr().err
+
+
+def test_age_with_decimal_comma_stops(tmp_path, capsys):
+    def modify(split, source, df):
+        if split == "test" and source == "healthy_file":
+            df["age"] = df["age"].astype(object)
+            df.loc[_first_native(df), "age"] = "45,3"
+        return df
+    d = build_pred_dir(tmp_path, modify)
+    assert _run(d, tmp_path / "out") == 2
+    assert "'45,3'" in capsys.readouterr().err
+    assert _run(d, tmp_path / "out2", "--no-strict") == 0
+    assert "without a numeric prediction or age" in (tmp_path / "out2" / "checks.md").read_text()
+
+
+def test_byte_order_mark_is_accepted(pred_dir, tmp_path):
+    out = tmp_path / "out"
+    assert _run(build_pred_dir(tmp_path, encoding="utf-8-sig"), out) == 0
+    assert _run(pred_dir, tmp_path / "ref") == 0
+    assert _stat(out, "Test", "N scans") == _stat(tmp_path / "ref", "Test", "N scans")
+
+
+def test_latin1_file_stops_with_clear_message(tmp_path, capsys):
+    def modify(split, source, df):
+        if source == "prediction_file":
+            df.loc[df.index[0], "neurological_diagnosis"] = "Démence"
+        return df
+    assert _run(build_pred_dir(tmp_path, modify, encoding="latin-1"), tmp_path / "out") == 2
+    assert "not UTF-8" in capsys.readouterr().err
+
+
+def test_sex_variants_are_kept_and_reported(pred_dir, tmp_path):
+    def modify(split, source, df):
+        df["sex"] = df["sex"].replace({"female": "F", "male": " Male "})
+        return df
+    out = tmp_path / "out"
+    assert _run(build_pred_dir(tmp_path, modify), out) == 0
+    assert _run(pred_dir, tmp_path / "ref") == 0
+    assert _stat(out, "Test", "N scans") == _stat(tmp_path / "ref", "Test", "N scans")
+    assert "'sex'" in (out / "checks.md").read_text()
+
+
+def test_inventory_reports_typographic_apostrophe(tmp_path, capsys):
+    def modify(split, source, df):
+        if source == "prediction_file":
+            df["neurological_diagnosis"] = df["neurological_diagnosis"].replace(
+                {"Alzheimer's Disease": "Parkinson\u2019s Disease"})
+        return df
+    d = build_pred_dir(tmp_path, modify)
+    assert inv.main(["--pred-dir", str(d), "--out-dir", str(tmp_path)]) == 0
+    printed = capsys.readouterr().out
+    assert "Parkinson\u2019s Disease" in printed and "not mapped" in printed
+    tok = pd.read_csv(tmp_path / "inventory" / "diagnosis_tokens.csv", keep_default_na=False)
+    assert tok.set_index("token").loc["Parkinson\u2019s Disease", "rule"] == "NOT MAPPED (ignored)"
+    md = (tmp_path / "inventory" / "inventory.md").read_text()
+    assert "typographic quotes" in md
+    dbs = pd.read_csv(tmp_path / "inventory" / "databases.csv")
+    acc = pd.read_csv(tmp_path / "inventory" / "scan_accounting.csv")
+    assert dbs["scans"].sum() == acc["native original scans"].sum()            # every scan listed

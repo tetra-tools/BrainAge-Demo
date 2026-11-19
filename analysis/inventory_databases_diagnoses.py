@@ -134,11 +134,16 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     notes: List[str] = []
     try:
-        df = aio.native_scans(aio.read_all(pred_dir, args.model_tag, notes), notes)
+        raw = aio.read_all(pred_dir, args.model_tag, notes)
+        df = aio.native_scans(raw, notes)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     df = df.assign(_subject=aio.subject_key(df))
+    # The inventory never stops on labelling problems: it lists them so they can be fixed.
+    errors, warnings = aio.audit_labels(raw, df)
+    accounting = aio.scan_accounting(raw, df)
+    accounting.to_csv(out / "scan_accounting.csv", index=False)
 
     tables = {
         "databases": database_table(df),
@@ -156,6 +161,10 @@ def main(argv=None) -> int:
           "Rows: native original scans read as in the Figure 13 forest plot (healthy + prediction files, "
           "drop_duplicates), all participants. Grouping rules: analysis/diagnosis_groups.py (copied from the "
           "notebook).", "", *[f"- {n}" for n in notes]]
+    md += ["", "## Labelling and encoding problems", "",
+           *([f"- ERROR (scans dropped or misgrouped): {e}" for e in errors]
+             + [f"- WARNING: {w}" for w in warnings] or ["None found."]),
+           "", "## Scan accounting", "", aio.markdown_table(accounting)]
     for name, table in tables.items():
         table.to_csv(out / f"{name}.csv", index=False)
         md += ["", f"## {titles[name]}", "", aio.markdown_table(table)]
@@ -174,6 +183,10 @@ def main(argv=None) -> int:
             print("   not mapped: " + "; ".join(f"{t} ({n:,})" for t, n in zip(unmapped["token"], unmapped["scans"])))
         if len(multi):
             print("   several rules: " + "; ".join(f"{t} -> {g}" for t, g in zip(multi["token"], multi["group"])))
+    for e in errors:
+        print(f"ERROR: {e}")
+    for w in warnings:
+        print(f"WARNING: {w}")
     print(f"Tables written to {out}")
     return 0
 

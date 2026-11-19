@@ -83,11 +83,14 @@ def load_population(pred_dir: Path, model_tag: str, train_file, notes: List[str]
     native = aio.native_scans(raw, notes)
 
     pop = native[native[aio.COL_HEALTHY] == 1].copy()
+    for col in (aio.COL_PRED, aio.COL_AGE):      # non-numbers become missing (named by aio.audit_labels)
+        pop[col] = pd.to_numeric(pop[col], errors="coerce")
     n0 = len(pop)
     pop = pop.dropna(subset=[aio.COL_PRED, aio.COL_AGE])
     if len(pop) < n0:
-        notes.append(f"{n0 - len(pop):,} healthy native scans without prediction or age removed.")
-    pop["_age"] = np.floor(pop[aio.COL_AGE].astype(float))
+        notes.append(f"WARNING: {n0 - len(pop):,} healthy native scans without a numeric prediction or age "
+                     "are not analysed.")
+    pop["_age"] = np.floor(pop[aio.COL_AGE])
     pop["_subject"] = aio.subject_key(pop)
     pop["_scan"] = aio.scan_key(pop)
 
@@ -97,9 +100,11 @@ def load_population(pred_dir: Path, model_tag: str, train_file, notes: List[str]
     allrows = raw[raw[aio.COL_HEALTHY] == 1]
     cols = [c for c in allrows.columns if not c.startswith("_")
             and (c not in aio.DROP_COLS or c in (aio.COL_AUG, aio.COL_ORIGINAL))]
-    allrows = (allrows.drop_duplicates(subset=["_split", *cols], keep="first")
-               .dropna(subset=[aio.COL_PRED, aio.COL_AGE]).copy())
-    allrows["_age"] = np.floor(allrows[aio.COL_AGE].astype(float))
+    allrows = allrows.drop_duplicates(subset=["_split", *cols], keep="first").copy()
+    for col in (aio.COL_PRED, aio.COL_AGE):
+        allrows[col] = pd.to_numeric(allrows[col], errors="coerce")
+    allrows = allrows.dropna(subset=[aio.COL_PRED, aio.COL_AGE])
+    allrows["_age"] = np.floor(allrows[aio.COL_AGE])
     allrows["_subject"] = aio.subject_key(allrows)
     return raw, native, pop, allrows
 
@@ -114,9 +119,6 @@ def group_masks(df: pd.DataFrame) -> Dict[str, pd.Series]:
 def data_checks(native: pd.DataFrame, pop: pd.DataFrame, notes: List[str]) -> None:
     ext_db = native.loc[native["_split"] == aio.SPLIT_EXTERNAL, aio.COL_DATABASE].astype(str)
     notes.append(f"External validation databases: {ext_db.value_counts().to_dict()}")
-    other = sorted(set(ext_db) - set(aio.EXTERNAL_DATABASES))
-    if other:
-        notes.append(f"ANOMALY: external validation contains other databases: {other}")
     missing = sorted(set(aio.EXTERNAL_DATABASES) - set(ext_db))
     if missing:
         raise ValueError(f"External validation split has no rows for database(s) {missing}.")
@@ -145,19 +147,24 @@ def data_checks(native: pd.DataFrame, pop: pd.DataFrame, notes: List[str]) -> No
     if len(dup):
         notes.append(f"ANOMALY: {dup['_scan'].nunique():,} subject/session pairs have several native "
                      f"healthy scans ({len(dup):,} rows); all are kept.")
-    from_pf = int((pop["_source"] == "prediction_file").sum())
-    notes.append(f"Healthy native scans taken from the prediction (clinical) file: {from_pf:,}.")
     notes.append(f"'{aio.COL_HEALTHY}' values (native scans): "
                  f"{native[aio.COL_HEALTHY].value_counts(dropna=False).to_dict()}")
-    frac_int = float(np.mean(np.isclose(pop[aio.COL_AGE].astype(float) % 1, 0)))
+    frac_int = float(np.mean(np.isclose(pop[aio.COL_AGE] % 1, 0)))
     notes.append(f"'{aio.COL_AGE}' whole numbers: {frac_int:.1%} (age is floored in all analyses).")
-    sex = pop[aio.COL_SEX].astype(str).str.lower().str.strip()
-    bad = pop.loc[~sex.isin(["female", "male"]) & (pop["_split"] != aio.SPLIT_TRAIN)]   # Figure 13 splits only
-    if len(bad):
-        notes.append(f"{len(bad):,} healthy native scans with sex not 'female'/'male' "
-                     f"(values {bad[aio.COL_SEX].value_counts(dropna=False).to_dict()}, databases "
-                     f"{bad[aio.COL_DATABASE].value_counts().to_dict()}): kept here, but dropped by "
-                     "the complete-case filter of the Figure 13 OLS models.")
+
+
+def check_accounting(acc: pd.DataFrame, pop: pd.DataFrame, stats: dict) -> List[str]:
+    """Every healthy native scan with a prediction is in exactly one group; returns problems."""
+    problems = []
+    masks = group_masks(pop)
+    per_split = acc.set_index("split")["healthy, with prediction and age"]
+    for split, gkey in ((aio.SPLIT_TEST, "Test"), (aio.SPLIT_EXTERNAL, "External"), (aio.SPLIT_TRAIN, TRAIN)):
+        if split in per_split.index and gkey in stats and stats[gkey]["N scans"] != per_split[split]:
+            problems.append(f"{GROUP_LABELS[gkey]}: {stats[gkey]['N scans']:,} scans analysed but "
+                            f"{per_split[split]:,} healthy native scans with prediction and age.")
+    if int(masks["camcan"].sum() + masks["oasis3"].sum()) != int(masks["External"].sum()):
+        problems.append("External validation scans are not all in Cam-CAN or OASIS-3.")
+    return problems
 
 
 # =============================================================================
@@ -274,11 +281,20 @@ def subgroup_table(pop: pd.DataFrame, allrows: pd.DataFrame, age_bins, n_boot: i
         if not m.any():
             continue
         a = allrows[m]
-        aug = a[aio.COL_AUG].astype(str)
-        # "native" = the figure population (native & is_original); other levels: any is_original
-        add(gkey, "augmentation", "native", a[(aug == "native") & (a[aio.COL_ORIGINAL] == True)])  # noqa: E712
-        for lev in sorted(set(aug) - {"native"}):
-            add(gkey, "augmentation", lev, a[aug == lev])
+        aug = a[aio.COL_AUG].astype("string").fillna("")
+        native_rows = (aug == "native") & (a[aio.COL_ORIGINAL] == True)  # noqa: E712 (figure population)
+        augmented = ~native_rows & (aug.str.strip() != "")
+        add(gkey, "augmentation", "native", a[native_rows])
+        listed = pd.Series(False, index=a.index)
+        for t in aio.AUGMENTATION_TRANSFORMS:          # a row is counted once for each transform it contains
+            has_t = augmented & aug.str.contains(t, case=False, regex=False)
+            listed |= has_t
+            add(gkey, "augmentation", f"contains {t}", a[has_t])
+        if (augmented & ~listed).any():
+            add(gkey, "augmentation", "augmented, none of the listed transforms", a[augmented & ~listed])
+        if (aug.str.strip() == "").any():
+            add(gkey, "augmentation", "no augmentation label", a[aug.str.strip() == ""])
+        add(gkey, "augmentation", "all augmented rows", a[augmented])
         add(gkey, "augmentation", "all rows (native + augmented)", a)
     return pd.DataFrame(rows)
 
@@ -579,8 +595,11 @@ def parse_args(argv=None):
                    help="bootstrap resamples of participants (default: %(default)s)")
     p.add_argument("--seed", type=int, default=SEED, help="bootstrap seed (default: %(default)s)")
     p.add_argument("--train-file",
-                   help="optional prediction table of the training set (same columns), predicted by the final "
-                        "model; adds a Training column (same population rules) to compare with test/external")
+                   help="prediction table of the training set (same columns), predicted by the final model; "
+                        "default: <pred-dir>/predictions_train_<model-tag>.tsv if it exists")
+    p.add_argument("--no-train", action="store_true", help="do not add the training set")
+    p.add_argument("--no-strict", action="store_true",
+                   help="report labelling/encoding errors in checks.md instead of stopping")
     return p.parse_args(argv)
 
 
@@ -594,16 +613,29 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     notes: List[str] = []
 
+    train_file = None
+    if args.train_file:
+        train_file = Path(args.train_file)
+    elif not args.no_train:
+        candidate = pred_dir / aio.TRAIN_FILE_TEMPLATE.format(tag=args.model_tag)
+        if candidate.is_file():
+            train_file = candidate
+            notes.append(f"Training set added automatically from {candidate.name} (use --no-train to leave it out).")
     try:
-        train_file = Path(args.train_file) if args.train_file else None
-        _, native, pop, allrows = load_population(pred_dir, args.model_tag, train_file, notes)
+        raw, native, pop, allrows = load_population(pred_dir, args.model_tag, train_file, notes)
+        errors, warnings = aio.audit_labels(raw, native)
+        if errors and not args.no_strict:
+            raise aio.DataError("labelling/encoding problems would drop scans (rerun with --no-strict to only "
+                                "report them):\n  - " + "\n  - ".join(errors))
+        notes += [f"ERROR (reported only, --no-strict): {e}" for e in errors] + [f"WARNING: {w}" for w in warnings]
         data_checks(native, pop, notes)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    accounting = aio.scan_accounting(raw, native)
 
     masks = group_masks(pop)
-    groups = GROUP_ORDER + ([TRAIN] if args.train_file else [])
+    groups = GROUP_ORDER + ([TRAIN] if train_file is not None else [])
     stats = {}
     for gkey in groups:
         g = pop[masks[gkey]]
@@ -611,6 +643,13 @@ def main(argv=None) -> int:
             print(f"error: group {GROUP_LABELS[gkey]} has {len(g)} scans", file=sys.stderr)
             return 2
         stats[gkey] = group_stats(g, args.age_bins, args.n_boot, args.seed)
+
+    problems = check_accounting(accounting, pop, stats)
+    if problems and not args.no_strict:
+        print("error: scans not accounted for:\n  - " + "\n  - ".join(problems), file=sys.stderr)
+        return 2
+    notes += [f"ERROR (reported only, --no-strict): {p}" for p in problems]
+    accounting.to_csv(out / "scan_accounting.csv", index=False)
 
     pdf, png = make_figure(pop, stats, out)
 
@@ -644,10 +683,15 @@ def main(argv=None) -> int:
     for gkey in groups:
         notes.append(f"{GROUP_LABELS[gkey]}: {stats[gkey]['N |gap|>15']:,} scan(s) with |gap| > {GAP_FLAG:g} "
                      "years (kept; listed in scans_abs_gap_gt15.csv).")
-    (out / "checks.md").write_text("# Data checks\n\n" + "\n".join(f"- {n}" for n in notes) + "\n")
+    (out / "checks.md").write_text(
+        "# Data checks\n\n## Scan accounting\n\n" + aio.markdown_table(accounting) + "\n\n"
+        "Every scan in the files has a native original row, every native scan is healthy == 0 or 1, and every "
+        "healthy native scan with a prediction is in exactly one group.\n\n## Notes\n\n"
+        + "\n".join(f"- {n}" for n in notes) + "\n")
 
     print(f"Figure : {pdf}\n         {png}")
-    for name in ("brainage_stats.md", "brainage_mae_by_subgroup.md", "brainage_text_snippets.md", "checks.md"):
+    for name in ("brainage_stats.md", "brainage_mae_by_subgroup.md", "brainage_text_snippets.md", "checks.md",
+                 "scan_accounting.csv"):
         print(f"Output : {out / name}")
     print("\n" + wide_df.to_string())
     return 0
