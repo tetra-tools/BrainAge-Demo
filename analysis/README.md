@@ -107,8 +107,15 @@ Rscript analysis/demographics_tables.R            # -> results/analysis/demograp
 Reads all prediction tables of one model (`--model-tag`), every column as text, keeps one row
 per scan (native original scan; rows present in both files counted once) and applies the
 Figure 13 diagnosis rules (tokens split on `, ; |`). Subject level: baseline status, age, sex,
-APOE, sessions, samples (native + augmented) and follow-up duration (subjects with more than
-one session only). Scan level: status, age, diagnosis flags, augmented samples per transform.
+APOE, sessions, samples (native + augmented, rows present in both files counted once) and
+follow-up duration in two rows (all subjects with single session = 0; subjects with at least
+two sessions only). Sex: female/male in any case; a missing value is filled from the same
+participant's other scans when they agree. APOE: 0 = non-carrier, > 0 = carrier; -1, -1.0,
+`Unknown`, empty and NA = unknown. Scan level: status, age, diagnosis flags, augmented samples
+per transform. `diagnosis_flag_counts.tsv` counts flags as Figure 13 (`n_positive`: all native
+scans of the split), with the number of healthy scans among them. `split_counts.tsv` gives
+scans, participants and CN participants (healthy == 1) per split; `demographics_checks.txt`
+repeats them and lists every raw sex and APOE value with its coded category.
 It stops on the same labelling problems as the Python scripts (`--no-strict` to only report
 them) and writes `subject_level.tsv`, `scan_level.tsv`, `diagnosis_flag_counts.tsv` and
 `demographics_checks.txt`; `--no-tables` skips the `.docx` tables.

@@ -364,8 +364,17 @@ def test_r_demographics_counts_match_python(pred_dir, tmp_path):
         n = native[native["_split"] == split]
         assert (subjects["split"] == split).sum() == aio.subject_key(n).nunique()
     single = subjects["n_sessions"] == 1
-    assert subjects.loc[single, "followup_duration"].isna().all()       # not 0 for single-session subjects
-    assert subjects.loc[~single, "followup_duration"].notna().all()
+    assert (subjects.loc[single, "followup_all"] == 0).all()            # row 1: single session = 0
+    assert subjects.loc[single, "followup_multi"].isna().all()          # row 2: only >= 2 sessions
+    assert (subjects.loc[~single, "followup_multi"] == subjects.loc[~single, "followup_all"]).all()
+    flags = pd.read_csv(tmp_path / "diagnosis_flag_counts.tsv", sep="\t").set_index("flag")
+    for split in aio.SPLITS:                                            # same counts as Figure 13 n_positive
+        n = native[native["_split"] == split]
+        for domain, col in (("neuro", aio.COL_NEURO_DX), ("psych", aio.COL_PSYCH_DX)):
+            groups = n[col].map(lambda v: dg.string_groups(None if pd.isna(v) else v, domain)[0])
+            for flag in flags.index[flags.index.str.startswith(domain)]:
+                expected = int(groups.map(lambda g: flag.split("_flag_")[1] in g).sum())
+                assert flags.loc[flag, f"n_positive_{split}"] == expected, (flag, split)
     scans = pd.read_csv(tmp_path / "scan_level.tsv", sep="\t")
     assert len(scans) == len(native)
     assert (scans["n_samples"] == 3).all()                              # native + 2 augmented, no double count
@@ -501,3 +510,37 @@ def test_checks_md_does_not_claim_success_with_no_strict(tmp_path):
     assert _run(build_pred_dir(tmp_path, modify), out, "--no-strict") == 0
     text = (out / "checks.md").read_text()
     assert "PROBLEMS FOUND" in text and "Every scan in the files has one native" not in text
+
+
+@needs_r
+def test_r_demographics_sex_apoe_followup_and_duplicates(tmp_path):
+    def scan(sub, ses, age, healthy, sex, apoe, dx_p="Healthy"):
+        return [dict(subject_id=sub, session_id=ses, database="oasis3", split="validation", augmentation=a,
+                     is_original=a == "native", age=age, predicted_age_years=age + 1.5, sex=sex, healthy=healthy,
+                     apoe=apoe, neurological_diagnosis="Cognitively Normal", psychiatric_diagnosis=dx_p)
+                for a in ("native", "RandomFlip", "RandomNoise")]
+    hf = pd.DataFrame(scan("A", "ses-1", 60, 1, "Female", "0") + scan("B", "ses-1", 70, 1, "male", "-1.0")
+                      + scan("B", "ses-2", 73, 1, None, "-1.0") + scan("C", "ses-1", 65, 1, "female", "Unknown")
+                      + scan("D", "ses-1", 66, 1, "Male", "1") + scan("E", "ses-1", 67, 1, None, None))
+    pf = pd.concat([hf[hf["subject_id"] == "B"],                         # B also in the clinical file
+                    pd.DataFrame(scan("P", "ses-1", 75, 0, "female", "-1",
+                                      "Major Depressive Disorder; Anxiety Disorder"))])
+    for name, df in (("predictions_validation", hf), ("predictions_prediction-validation", pf)):
+        df.to_csv(tmp_path / f"{name}_{TAG}.tsv", sep="\t", index=False)
+    res = _run_r(tmp_path, tmp_path / "out")
+    assert res.returncode == 0, res.stderr
+    s = pd.read_csv(tmp_path / "out" / "subject_level.tsv", sep="\t").set_index("subject_id")
+    assert s.loc["B", "n_samples"] == 6                                  # not 12: counted once
+    assert (s.loc["A", "followup_all"], s.loc["B", "followup_all"]) == (0, 3)
+    assert pd.isna(s.loc["A", "followup_multi"]) and s.loc["B", "followup_multi"] == 3
+    assert s["sex"].to_dict() == {"A": "Female", "B": "Male", "C": "Female", "D": "Male", "E": "Unknown",
+                                  "P": "Female"}
+    assert s["apoe"].to_dict() == {"A": "Non-carrier", "B": "Unknown", "C": "Unknown", "D": "Carrier",
+                                   "E": "Unknown", "P": "Unknown"}
+    checks = (tmp_path / "out" / "demographics_checks.txt").read_text()
+    assert "given the sex of the same participant" in checks
+    counts = pd.read_csv(tmp_path / "out" / "split_counts.tsv", sep="\t").set_index("split").loc["validation"]
+    assert (counts["scans"], counts["participants"]) == (7, 6)
+    assert (counts["CN participants (healthy == 1)"], counts["CN scans (healthy == 1)"]) == (5, 6)   # people, not rows
+    f = pd.read_csv(tmp_path / "out" / "diagnosis_flag_counts.tsv", sep="\t").set_index("flag")
+    assert f.loc["psych_flag_MDD", "n_positive_validation"] == 1 == f.loc["psych_flag_Anxiety", "n_positive_validation"]

@@ -11,7 +11,9 @@
 #   demographics_table_split.docx        subject level, by split    (needs gtsummary + gt)
 #   demographics_table_split_scans.docx  scan level, by split       (needs gtsummary + gt)
 #   subject_level.tsv, scan_level.tsv    the data behind the two tables
-#   diagnosis_flag_counts.tsv            patients' native scans per diagnosis flag and split
+#   split_counts.tsv                     scans, participants and CN participants (healthy == 1) per split
+#   diagnosis_flag_counts.tsv            native scans per diagnosis flag and split, counted as the
+#                                        Figure 13 forest plot (n_positive), and how many are healthy
 #   demographics_checks.txt              counts and label checks
 #
 # Splits: train = Training; test = Test (hyperparameter selection);
@@ -28,6 +30,7 @@ suppressPackageStartupMessages({
 })
 
 DEFAULT_MODEL_TAG <- "lossmae_h32_lr0.04_batch16_dr0.4_model_best_score"
+APOE_MISSING_TEXT <- c("", "na", "unknown", "unknow")   # with NA and the numeric code -1 (-1, -1.0)
 SPLIT_LABELS <- c(train = "Training", test = "Test (hyperparameter selection)",
                   validation = "External validation (Cam-CAN, OASIS-3)")
 EXTERNAL_DATABASES <- c("camcan", "oasis3")
@@ -136,6 +139,17 @@ read_predictions <- function(pred_dir, model_tag) {
   })
 }
 
+code_apoe <- function(x) {
+  # 0 = non-carrier, > 0 = carrier; -1, -1.0, "Unknown", empty and NA are missing. Anything else is
+  # not recognised: returned as NA so prepare() can report it, and shown as "Unknown".
+  v <- str_trim(as.character(x))
+  num <- suppressWarnings(as.numeric(v))
+  case_when(is.na(v) | tolower(v) %in% APOE_MISSING_TEXT | num %in% -1 ~ "Unknown",
+            num %in% 0 ~ "Non-carrier",
+            !is.na(num) & num > 0 ~ "Carrier",
+            TRUE ~ NA_character_)
+}
+
 as_flag <- function(x) {
   v <- tolower(str_trim(x))
   case_when(v %in% c("true", "1", "1.0") ~ TRUE, v %in% c("false", "0", "0.0") ~ FALSE, TRUE ~ NA)
@@ -202,11 +216,30 @@ prepare <- function(raw) {
   if (any(ext_bad)) problems <- c(problems, sprintf("'database': %d external validation scans labelled %s",
                                                     sum(ext_bad), show(native$database[ext_bad])))
 
-  odd_sex <- native$sex[!tolower(str_trim(native$sex)) %in% c("female", "male")]
-  if (length(odd_sex)) warnings <- c(warnings, sprintf("'sex': %d native scans not female/male (shown as Unknown): %s",
+  # sex: Female/female/Male/male (any case, spaces) are coded; a missing value is filled from the same
+  # participant's other native scans when those agree; disagreements are reported, never filled
+  native <- native %>%
+    mutate(sex_raw = sex,
+           sex_norm = tolower(str_trim(sex)),
+           sex_norm = if_else(sex_norm %in% c("female", "male"), sex_norm, NA_character_)) %>%
+    group_by(database, subject_id) %>%
+    mutate(sex_known = paste(sort(unique(na.omit(sex_norm))), collapse = "/"),
+           sex_filled = is.na(sex_norm) & sex_known %in% c("female", "male"),
+           sex_norm = if_else(sex_filled, sex_known, sex_norm)) %>%
+    ungroup()
+  odd_sex <- native$sex_raw[!is.na(native$sex_raw) & !tolower(str_trim(native$sex_raw)) %in% c("female", "male")]
+  if (length(odd_sex)) warnings <- c(warnings, sprintf("'sex': %d native scans with a value other than female/male: %s",
                                                        length(odd_sex), show(odd_sex)))
-  odd_apoe <- native$apoe[!is.na(native$apoe) & is.na(suppressWarnings(as.numeric(native$apoe)))]
-  if (length(odd_apoe)) warnings <- c(warnings, sprintf("'apoe': %d values are not numbers (shown as Unknown): %s",
+  if (any(native$sex_filled)) warnings <- c(warnings, sprintf(
+    "'sex': %d native scans had no sex and were given the sex of the same participant's other scans",
+    sum(native$sex_filled)))
+  mixed <- unique(paste(native$database, native$subject_id)[native$sex_known == "female/male"])
+  if (length(mixed)) warnings <- c(warnings, sprintf("'sex': %d participants are female on some scans and male on others (not changed): %s",
+                                                     length(mixed), show(mixed)))
+  n_missing_sex <- sum(is.na(native$sex_norm))
+  if (n_missing_sex) warnings <- c(warnings, sprintf("'sex': %d native scans remain without sex (shown as Unknown)", n_missing_sex))
+  odd_apoe <- native$apoe[is.na(code_apoe(native$apoe))]
+  if (length(odd_apoe)) warnings <- c(warnings, sprintf("'apoe': %d values not recognised (not 0, > 0, -1, Unknown, empty; shown as Unknown): %s",
                                                         length(odd_apoe), show(odd_apoe)))
   n_paths <- if ("path" %in% names(native)) n_distinct(native$path) else NA
   if (!is.na(n_paths) && n_paths != nrow(native)) {
@@ -228,13 +261,10 @@ prepare <- function(raw) {
 
   scans <- native %>%
     mutate(healthy = healthy_num,
-           sex_raw = sex,
-           sex = case_when(tolower(str_trim(sex)) == "female" ~ "Female",
-                           tolower(str_trim(sex)) == "male" ~ "Male", TRUE ~ "Unknown"),
+           sex = case_when(sex_norm == "female" ~ "Female", sex_norm == "male" ~ "Male", TRUE ~ "Unknown"),
            apoe_raw = apoe,
-           apoe = suppressWarnings(as.numeric(apoe)),
-           # mapping of the original script; the meaning of the APOE codes is to be confirmed
-           apoe = case_when(abs(apoe) == 0 ~ "Non-carrier", abs(apoe) > 0 ~ "Carrier", TRUE ~ "Unknown")) %>%
+           apoe = coalesce(code_apoe(apoe), "Unknown")) %>%
+    select(-sex_norm, -sex_known) %>%
     left_join(per_scan, by = "scan_key") %>%
     add_flags()
   list(scans = scans, problems = problems, warnings = warnings, rows_read = nrow(raw), rows_distinct = nrow(rows))
@@ -247,8 +277,10 @@ subject_level <- function(scans) {
     summarise(
       n_sessions = n_distinct(session_id),
       # computed before `age` is replaced by the baseline age below
-      followup_duration = if (n_distinct(session_id) > 1 && sum(!is.na(age)) > 1)
-        max(age, na.rm = TRUE) - min(age, na.rm = TRUE) else NA_real_,
+      # two versions: single-session subjects as 0, and subjects with >= 2 sessions only (others NA)
+      followup_all = if (n_distinct(session_id) > 1 && sum(!is.na(age)) > 1)
+        max(age, na.rm = TRUE) - min(age, na.rm = TRUE) else 0,
+      followup_multi = if (n_distinct(session_id) > 1 && sum(!is.na(age)) > 1) followup_all else NA_real_,
       healthy_changes = n_distinct(healthy) > 1,
       n_samples = sum(n_samples),
       age = first(age), sex = first(sex), apoe = first(apoe), healthy = first(healthy),
@@ -256,17 +288,26 @@ subject_level <- function(scans) {
 }
 
 flag_counts <- function(scans) {
+  # as Figure 13 (n_positive): every native scan of the split, healthy or not; plus how many are healthy
   scans %>%
-    filter(split %in% c("test", "validation"), healthy == 0) %>%
-    select(split, starts_with("neuro_flag_"), starts_with("psych_flag_")) %>%
-    pivot_longer(-split, names_to = "flag", values_to = "value") %>%
-    group_by(flag, split) %>% summarise(n_positive = sum(value), .groups = "drop") %>%
-    pivot_wider(names_from = split, values_from = n_positive) %>%
-    arrange(desc(rowSums(pick(where(is.numeric)), na.rm = TRUE)))
+    filter(split %in% c("test", "validation")) %>%
+    select(split, healthy, starts_with("neuro_flag_"), starts_with("psych_flag_")) %>%
+    pivot_longer(-c(split, healthy), names_to = "flag", values_to = "value") %>%
+    group_by(flag, split) %>%
+    summarise(n_positive = sum(value), healthy = sum(value & healthy == 1), .groups = "drop") %>%
+    pivot_wider(names_from = split, values_from = c(n_positive, healthy), names_glue = "{.value}_{split}") %>%
+    arrange(desc(rowSums(pick(starts_with("n_positive")), na.rm = TRUE)))
 }
 
 # ---------------------------------------------------------------- tables (gtsummary)
 split_factor <- function(x) factor(x, levels = names(SPLIT_LABELS), labels = SPLIT_LABELS)
+
+relabel_missing <- function(tbl, variable_name, text) {
+  # label of the missing-value row of one variable (gtsummary has one missing_text for all variables)
+  tryCatch(gtsummary::modify_table_body(tbl, ~ dplyr::mutate(.x, label = dplyr::if_else(
+    .data$variable == variable_name & .data$row_type == "missing", text, .data$label))),
+    error = function(e) tbl)
+}
 
 make_tables <- function(subjects, scans, out_dir) {
   if (!requireNamespace("gtsummary", quietly = TRUE) || !requireNamespace("gt", quietly = TRUE)) {
@@ -282,13 +323,15 @@ make_tables <- function(subjects, scans, out_dir) {
       healthy = factor(healthy, levels = c(0, 1), labels = c("Non-healthy", "Healthy")),
       age, sex = factor(sex, levels = c("Female", "Male", "Unknown")),
       apoe = factor(apoe, levels = c("Non-carrier", "Carrier", "Unknown")),
-      n_sessions, n_samples, followup_duration)
+      n_sessions, n_samples, followup_all, followup_multi)
   tbl_summary(
     subj, by = split, missing = "ifany", statistic = stat, digits = all_continuous() ~ 2,
-    include = c(healthy, age, sex, apoe, n_sessions, n_samples, followup_duration),
+    include = c(healthy, age, sex, apoe, n_sessions, n_samples, followup_all, followup_multi),
     label = list(healthy ~ "Status at baseline", age ~ "Age at baseline (years)", sex ~ "Sex", apoe ~ "APOE",
                  n_sessions ~ "Sessions per subject", n_samples ~ "Samples per subject (native + augmented)",
-                 followup_duration ~ "Follow-up duration (years; subjects with > 1 session)")) %>%
+                 followup_all ~ "Follow-up duration, all subjects (years; single session = 0)",
+                 followup_multi ~ "Follow-up duration, subjects with >= 2 sessions (years)")) %>%
+    relabel_missing("followup_multi", "Single session (no follow-up)") %>%
     add_overall() %>%
     as_gt() %>%
     gt::gtsave(filename = file.path(out_dir, "demographics_table_split.docx"))
@@ -359,15 +402,18 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   counts <- flag_counts(scans)
   write_tsv(counts, file.path(out_dir, "diagnosis_flag_counts.tsv"))
 
+  # one row per native scan here; participants = distinct database + subject_id
   per_split <- scans %>% group_by(split) %>%
     summarise(scans = n(), participants = n_distinct(paste(database, subject_id)),
-              healthy_participants = n_distinct(paste(database, subject_id)[healthy == 1]), .groups = "drop")
+              `CN participants (healthy == 1)` = n_distinct(paste(database, subject_id)[healthy == 1]),
+              `CN scans (healthy == 1)` = sum(healthy == 1), .groups = "drop")
+  write_tsv(per_split, file.path(out_dir, "split_counts.tsv"))
   checks <- c(
     sprintf("Model tag: %s", opts$model_tag),
     sprintf("Rows read: %d; distinct rows (identical rows of both files counted once): %d", prep$rows_read, prep$rows_distinct),
     capture.output(print(as.data.frame(per_split))),
     "", "Every raw sex value (native scans) and how it was coded:",
-    capture.output(print(as.data.frame(count(scans, split, sex_raw, sex)), row.names = FALSE)),
+    capture.output(print(as.data.frame(count(scans, split, sex_raw, sex_filled, sex)), row.names = FALSE)),
     "", "Every raw APOE value (native scans) and how it was coded:",
     capture.output(print(as.data.frame(count(scans, apoe_raw, apoe)), row.names = FALSE)), "",
     sprintf("ERROR: %s", prep$problems), sprintf("WARNING: %s", prep$warnings))
