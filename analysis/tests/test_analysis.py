@@ -335,3 +335,66 @@ def test_inventory_reports_typographic_apostrophe(tmp_path, capsys):
     dbs = pd.read_csv(tmp_path / "inventory" / "databases.csv")
     acc = pd.read_csv(tmp_path / "inventory" / "scan_accounting.csv")
     assert dbs["scans"].sum() == acc["native original scans"].sum()            # every scan listed
+
+
+# ---------------------------------------------------------------- R demographics script (skipped without R)
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+R_SCRIPT = ANALYSIS_DIR / "demographics_tables.R"
+_HAS_R = shutil.which("Rscript") is not None and subprocess.run(
+    ["Rscript", "-e", "for (p in c('readr','dplyr','stringr','purrr','tidyr')) stopifnot(requireNamespace(p))"],
+    capture_output=True).returncode == 0
+needs_r = pytest.mark.skipif(not _HAS_R, reason="Rscript with readr/dplyr/stringr/purrr/tidyr not available")
+
+
+def _run_r(pred_dir: Path, out: Path, *extra):
+    return subprocess.run(["Rscript", str(R_SCRIPT), "--pred-dir", str(pred_dir), "--out-dir", str(out),
+                           "--no-tables", *extra], capture_output=True, text=True)
+
+
+@needs_r
+def test_r_demographics_counts_match_python(pred_dir, tmp_path):
+    res = _run_r(pred_dir, tmp_path)
+    assert res.returncode == 0, res.stderr
+    subjects = pd.read_csv(tmp_path / "subject_level.tsv", sep="\t", dtype={"subject_id": str})
+    notes = []
+    native = aio.native_scans(aio.read_all(pred_dir, TAG, notes), notes)
+    for split in aio.SPLITS:
+        n = native[native["_split"] == split]
+        assert (subjects["split"] == split).sum() == aio.subject_key(n).nunique()
+    single = subjects["n_sessions"] == 1
+    assert subjects.loc[single, "followup_duration"].isna().all()       # not 0 for single-session subjects
+    assert subjects.loc[~single, "followup_duration"].notna().all()
+    scans = pd.read_csv(tmp_path / "scan_level.tsv", sep="\t")
+    assert len(scans) == len(native)
+    assert (scans["n_samples"] == 3).all()                              # native + 2 augmented, no double count
+
+
+@needs_r
+def test_r_flags_match_notebook_rules(tmp_path):
+    strings = [("neuro", s) for s in NEURO_DX + ["MCI; Stroke", "Other,,", "Parkinson’s Disease", ""]] + \
+              [("psych", s) for s in ["Healthy", "Major Depressive Disorder; Anxiety Disorder", "surgery", "GAD|OCD", ""]]
+    strings = [(d, s) for d, s in strings if s is not None]
+    pd.DataFrame(strings, columns=["domain", "dx"]).to_csv(tmp_path / "dx.tsv", sep="\t", index=False)
+    code = (f'suppressMessages(source("{R_SCRIPT}")); '
+            f'd <- readr::read_tsv("{tmp_path / "dx.tsv"}", col_types = "cc", na = character()); '
+            f'writeLines(vapply(seq_len(nrow(d)), function(i) paste(sort(dx_groups(d$dx[i], d$domain[i])), '
+            f'collapse = "+"), ""), "{tmp_path / "r.txt"}")')
+    res = subprocess.run(["Rscript", "-e", code], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    r_groups = (tmp_path / "r.txt").read_text().split("\n")[:len(strings)]
+    py_groups = ["+".join(sorted(dg.string_groups(s, d)[0])) for d, s in strings]
+    assert r_groups == py_groups
+
+
+@needs_r
+def test_r_demographics_stops_on_lost_scan(tmp_path):
+    def modify(split, source, df):
+        if split == "test" and source == "healthy_file":
+            df.loc[_first_native(df, last=True), "augmentation"] = "Native"
+        return df
+    res = _run_r(build_pred_dir(tmp_path, modify), tmp_path / "out")
+    assert res.returncode != 0 and "no native original row" in res.stderr
+    (tmp_path / "b").mkdir()
+    assert _run_r(build_pred_dir(tmp_path / "b", modify), tmp_path / "out2", "--no-strict").returncode == 0

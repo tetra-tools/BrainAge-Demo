@@ -8,6 +8,7 @@ Docker image.
 |---|---|
 | `fig_brainage_scatter.py` | predicted vs chronological age figure (healthy, native scans), statistics with bootstrap CIs, MAE by age band / sex / augmentation, thesis text |
 | `inventory_databases_diagnoses.py` | tables of all databases and of all raw neurological / psychiatric diagnoses before cleaning, with their grouping |
+| `demographics_tables.R` | demographics tables by split (subject level and scan level, `.docx`), diagnosis flag counts |
 
 Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does) and
 `diagnosis_groups.py` (diagnosis cleaning and grouping rules copied from the forest-plot notebook).
@@ -16,6 +17,8 @@ Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot doe
 
 ```bash
 pip install -r analysis/requirements.txt
+# R script: readr, dplyr, stringr, purrr, tidyr; gtsummary + gt for the .docx tables
+Rscript -e 'install.packages(c("readr","dplyr","stringr","purrr","tidyr","gtsummary","gt"))'
 ```
 
 ## Inputs
@@ -78,8 +81,32 @@ Rows: native original scans of all participants. Outputs in `inventory/`: `datab
 applied to each token, including tokens that are not mapped), `diagnosis_groups.csv`, and
 `inventory.md` with all tables.
 
+### `demographics_tables.R`
+
+```bash
+Rscript analysis/demographics_tables.R            # -> results/analysis/demographics/
+```
+
+Reads all prediction tables of one model (`--model-tag`), every column as text, keeps one row
+per scan (native original scan; rows present in both files counted once) and applies the
+Figure 13 diagnosis rules (tokens split on `, ; |`). Subject level: baseline status, age, sex,
+APOE, sessions, samples (native + augmented) and follow-up duration (subjects with more than
+one session only). Scan level: status, age, diagnosis flags, augmented samples per transform.
+It stops on the same labelling problems as the Python scripts (`--no-strict` to only report
+them) and writes `subject_level.tsv`, `scan_level.tsv`, `diagnosis_flag_counts.tsv` and
+`demographics_checks.txt`; `--no-tables` skips the `.docx` tables.
+
+## No scan lost
+
+Every script reads identifiers as text (leading zeros kept) and stops, listing the rows, when
+a labelling or encoding problem would drop or misgroup a scan: `augmentation` not exactly
+`native` or empty on an original row, `is_original` not boolean, `healthy` not 0/1, age or
+prediction not numeric, external label other than `camcan`/`oasis3`, a scan with no native
+original row, a file that is not UTF-8. `scan_accounting.csv` follows every scan from the files
+to the analysed groups. Use `--no-strict` to report these problems without stopping.
+
 ## Tests
 
 ```bash
-pytest analysis/tests      # synthetic data, a few seconds
+pytest analysis/tests      # synthetic data, ~20 s; the R tests are skipped if Rscript is missing
 ```
