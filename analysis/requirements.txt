@@ -1,0 +1,5 @@
+# Thesis analyses (analysis/). Not needed by the brainage package.
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+pytest>=8   # analysis/tests only
