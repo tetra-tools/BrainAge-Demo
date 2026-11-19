@@ -366,6 +366,10 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     sprintf("Model tag: %s", opts$model_tag),
     sprintf("Rows read: %d; distinct rows (identical rows of both files counted once): %d", prep$rows_read, prep$rows_distinct),
     capture.output(print(as.data.frame(per_split))),
+    "", "Every raw sex value (native scans) and how it was coded:",
+    capture.output(print(as.data.frame(count(scans, split, sex_raw, sex)), row.names = FALSE)),
+    "", "Every raw APOE value (native scans) and how it was coded:",
+    capture.output(print(as.data.frame(count(scans, apoe_raw, apoe)), row.names = FALSE)), "",
     sprintf("ERROR: %s", prep$problems), sprintf("WARNING: %s", prep$warnings))
   writeLines(checks, file.path(out_dir, "demographics_checks.txt"))
   cat(checks, sep = "\n")
