@@ -43,8 +43,10 @@ import analysis_io as aio  # noqa: E402
 
 # Groups: key -> (display label, selector). External validation first (main result).
 GROUP_ORDER = ["External", "camcan", "oasis3", "Test"]
+TRAIN = "Training"                    # optional (--train-file), shown last
+ALL_GROUPS = GROUP_ORDER + [TRAIN]
 GROUP_LABELS = {"External": "External validation", "camcan": "Cam-CAN",
-                "oasis3": "OASIS-3", "Test": "Test"}
+                "oasis3": "OASIS-3", "Test": "Test", TRAIN: "Training"}
 
 GAP_FLAG = 15.0
 DEFAULT_AGE_BINS = (40, 60, 75)       # bands: <40, 40-<60, 60-<75, >=75 (lower bound included)
@@ -73,9 +75,11 @@ FIG_WIDTH_CM, FIG_HEIGHT_CM = 16.0, 15.5
 # =============================================================================
 # Data
 # =============================================================================
-def load_population(pred_dir: Path, model_tag: str, notes: List[str]):
-    """Return (native healthy scans, all healthy rows incl. augmentations)."""
+def load_population(pred_dir: Path, model_tag: str, train_file, notes: List[str]):
+    """Return (all rows, native scans, native healthy scans, all healthy rows incl. augmentations)."""
     raw = aio.read_all(pred_dir, model_tag, notes)
+    if train_file is not None:
+        raw = pd.concat([raw, aio.read_training(train_file, notes)], ignore_index=True)
     native = aio.native_scans(raw, notes)
 
     pop = native[native[aio.COL_HEALTHY] == 1].copy()
@@ -104,7 +108,7 @@ def group_masks(df: pd.DataFrame) -> Dict[str, pd.Series]:
     ext = df["_split"] == aio.SPLIT_EXTERNAL
     db = df[aio.COL_DATABASE].astype(str)
     return {"External": ext, "camcan": ext & (db == "camcan"), "oasis3": ext & (db == "oasis3"),
-            "Test": df["_split"] == aio.SPLIT_TEST}
+            "Test": df["_split"] == aio.SPLIT_TEST, TRAIN: df["_split"] == aio.SPLIT_TRAIN}
 
 
 def data_checks(native: pd.DataFrame, pop: pd.DataFrame, notes: List[str]) -> None:
@@ -122,10 +126,20 @@ def data_checks(native: pd.DataFrame, pop: pd.DataFrame, notes: List[str]) -> No
         notes.append(f"ANOMALY: {leak:,} test scans belong to camcan/oasis3.")
     notes.append(f"Test databases: {test_db.nunique()}")
 
-    subj_test = set(aio.subject_key(native[native["_split"] == aio.SPLIT_TEST]))
-    subj_ext = set(aio.subject_key(native[native["_split"] == aio.SPLIT_EXTERNAL]))
-    if subj_test & subj_ext:
-        notes.append(f"ANOMALY: {len(subj_test & subj_ext):,} participants in both splits.")
+    subj = {sp: set(aio.subject_key(native[native["_split"] == sp]))
+            for sp in (aio.SPLIT_TRAIN, aio.SPLIT_TEST, aio.SPLIT_EXTERNAL)}
+    for a, b in ((aio.SPLIT_TEST, aio.SPLIT_EXTERNAL), (aio.SPLIT_TRAIN, aio.SPLIT_TEST),
+                 (aio.SPLIT_TRAIN, aio.SPLIT_EXTERNAL)):
+        if subj[a] & subj[b]:
+            notes.append(f"ANOMALY: {len(subj[a] & subj[b]):,} participants in both {a} and {b}.")
+    train = native[native["_split"] == aio.SPLIT_TRAIN]
+    if len(train):
+        tdb = train[aio.COL_DATABASE].astype(str)
+        notes.append(f"Training databases: {tdb.nunique()}; 'healthy' values: "
+                     f"{train[aio.COL_HEALTHY].value_counts(dropna=False).to_dict()}")
+        leak_train = tdb.isin(list(aio.EXTERNAL_DATABASES)).sum()
+        if leak_train:
+            notes.append(f"ANOMALY: {leak_train:,} training scans belong to camcan/oasis3.")
 
     dup = pop[pop.duplicated(["_split", "_scan"], keep=False)]
     if len(dup):
@@ -138,7 +152,7 @@ def data_checks(native: pd.DataFrame, pop: pd.DataFrame, notes: List[str]) -> No
     frac_int = float(np.mean(np.isclose(pop[aio.COL_AGE].astype(float) % 1, 0)))
     notes.append(f"'{aio.COL_AGE}' whole numbers: {frac_int:.1%} (age is floored in all analyses).")
     sex = pop[aio.COL_SEX].astype(str).str.lower().str.strip()
-    bad = pop.loc[~sex.isin(["female", "male"])]
+    bad = pop.loc[~sex.isin(["female", "male"]) & (pop["_split"] != aio.SPLIT_TRAIN)]   # Figure 13 splits only
     if len(bad):
         notes.append(f"{len(bad):,} healthy native scans with sex not 'female'/'male' "
                      f"(values {bad[aio.COL_SEX].value_counts(dropna=False).to_dict()}, databases "
@@ -245,6 +259,8 @@ def subgroup_table(pop: pd.DataFrame, allrows: pd.DataFrame, age_bins, n_boot: i
                      "MAE": mae, "ci95_low": lo, "ci95_high": hi})
 
     for gkey, m in group_masks(pop).items():
+        if not m.any():
+            continue
         g = pop[m]
         for lab, mm in age_band_masks(g["_age"].to_numpy(float), age_bins).items():
             add(gkey, "age (years)", lab, g[mm])
@@ -255,6 +271,8 @@ def subgroup_table(pop: pd.DataFrame, allrows: pd.DataFrame, age_bins, n_boot: i
         if len(other):
             add(gkey, "sex", "other / missing", other)
     for gkey, m in group_masks(allrows).items():
+        if not m.any():
+            continue
         a = allrows[m]
         aug = a[aio.COL_AUG].astype(str)
         # "native" = the figure population (native & is_original); other levels: any is_original
@@ -340,7 +358,10 @@ def make_figure(pop: pd.DataFrame, stats: dict, out_dir: Path):
     _scatter(ax_a, test["_age"], test[aio.COL_PRED], COLORS["Test"])
     ax_a.plot([lo, hi], [lo, hi], ls="--", lw=1.0, color=COLORS["identity"], zorder=4)
     _fit_line(ax_a, test["_age"].to_numpy(), test[aio.COL_PRED].to_numpy(), COLORS["Test_line"])
-    _inset(ax_a, _inset_text(stats["Test"]))
+    inset_a = _inset_text(stats["Test"])
+    if TRAIN in stats:
+        inset_a += f"\nTraining MAE = {stats[TRAIN]['MAE']:.2f} y"
+    _inset(ax_a, inset_a)
     ax_a.legend(handles=[_line(COLORS["identity"], "y = x", "--"), _line(COLORS["Test_line"], "OLS fit")],
                 loc="lower right", frameon=False, fontsize=FS["legend"], handlelength=1.8)
 
@@ -443,7 +464,7 @@ def stats_tables(stats, age_bins):
     long_rows, wide = [], {}
     for key, label, d, has_ci in stat_rows(age_bins):
         wide[label] = {}
-        for gkey in GROUP_ORDER:
+        for gkey in [g for g in ALL_GROUPS if g in stats]:
             s = stats[gkey]
             lo, hi = s["CI"][key] if has_ci else (np.nan, np.nan)
             cell = _fmt(s[key], d) + (f" ({_range(lo, hi, d)})" if has_ci else "")
@@ -453,7 +474,7 @@ def stats_tables(stats, age_bins):
             wide[label][GROUP_LABELS[gkey]] = cell
             long_rows.append({"group": GROUP_LABELS[gkey], "statistic": label, "estimate": s[key],
                               "ci95_low": lo, "ci95_high": hi, "n_in_band": n_band, "formatted": cell})
-    wide_df = pd.DataFrame(wide).T[[GROUP_LABELS[g] for g in GROUP_ORDER]]
+    wide_df = pd.DataFrame(wide).T[[GROUP_LABELS[g] for g in ALL_GROUPS if g in stats]]
     return pd.DataFrame(long_rows), wide_df
 
 
@@ -464,7 +485,7 @@ def subgroup_markdown(sub: pd.DataFrame) -> str:
                                    sub["N rows"], sub["N participants"])
     ]
     sub = sub.assign(cell=cells)
-    groups = [GROUP_LABELS[g] for g in GROUP_ORDER]
+    groups = [GROUP_LABELS[g] for g in ALL_GROUPS if GROUP_LABELS[g] in set(sub["group"])]
     blocks = []
     for factor in sub["factor"].drop_duplicates():
         f = sub[sub["factor"] == factor]
@@ -512,6 +533,14 @@ def thesis_text(stats) -> str:
               f"set ({_paren_slope(E)}) and {dT} associated with it in the test set ({_paren_slope(T)})")
     s4 += (", consistent with regression toward the mean; chronological age was therefore included as a "
            "covariate in the OLS models of Figure 13." if dE == dT == "negatively" else ".")
+    s5 = ""
+    if TRAIN in stats:
+        Tr = stats[TRAIN]
+        lo, hi = Tr["CI"]["MAE"]
+        s5 = (f" For comparison, the MAE on the native training scans was {_fmt(Tr['MAE'], 2)} years "
+              f"(95% CI {_range(lo, hi, 2)}; {Tr['N scans']:,} scans from {Tr['N participants']:,} participants), against "
+              f"{_fmt(T['MAE'], 2)} years in the test set and {_fmt(E['MAE'], 2)} years in the external "
+              "validation set.")
     legend = (
         "Figure X - Predicted brain age versus chronological age in healthy participants (native scans only; "
         "chronological age in whole years, floored). "
@@ -527,9 +556,12 @@ def thesis_text(stats) -> str:
         "the solid lines are OLS fits for the test set and the pooled external validation set. "
         "Insets report the number of scans and participants, the mean absolute error (MAE), Pearson's r, "
         "R² = 1 − SSres/SStot computed against the identity line, and the OLS slope; in (c), r and slope "
-        "refer to the regression of the gap on chronological age. Patients are not shown (see Figure 13)."
+        "refer to the regression of the gap on chronological age. "
+        + ("The inset of (a) also gives the MAE on the native training scans of healthy participants, for "
+           "comparison. " if TRAIN in stats else "")
+        + "Patients are not shown (see Figure 13)."
     )
-    return f"## Results text (IV.3.2)\n\n{s1} {s2} {s3} {s4}\n\n## Figure legend\n\n{legend}\n"
+    return f"## Results text (IV.3.2)\n\n{s1} {s2} {s3} {s4}{s5}\n\n## Figure legend\n\n{legend}\n"
 
 
 # =============================================================================
@@ -546,6 +578,9 @@ def parse_args(argv=None):
     p.add_argument("--n-boot", type=int, default=N_BOOT,
                    help="bootstrap resamples of participants (default: %(default)s)")
     p.add_argument("--seed", type=int, default=SEED, help="bootstrap seed (default: %(default)s)")
+    p.add_argument("--train-file",
+                   help="optional prediction table of the training set (same columns), predicted by the final "
+                        "model; adds a Training column (same population rules) to compare with test/external")
     return p.parse_args(argv)
 
 
@@ -560,15 +595,17 @@ def main(argv=None) -> int:
     notes: List[str] = []
 
     try:
-        _, native, pop, allrows = load_population(pred_dir, args.model_tag, notes)
+        train_file = Path(args.train_file) if args.train_file else None
+        _, native, pop, allrows = load_population(pred_dir, args.model_tag, train_file, notes)
         data_checks(native, pop, notes)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     masks = group_masks(pop)
+    groups = GROUP_ORDER + ([TRAIN] if args.train_file else [])
     stats = {}
-    for gkey in GROUP_ORDER:
+    for gkey in groups:
         g = pop[masks[gkey]]
         if len(g) < 3:
             print(f"error: group {GROUP_LABELS[gkey]} has {len(g)} scans", file=sys.stderr)
@@ -582,7 +619,8 @@ def main(argv=None) -> int:
     header = ("# Brain-age statistics (healthy participants, native scans)\n\n"
               "Population per split: augmentation == native & is_original, healthy == 1; chronological age "
               "floored to whole years. Test = hyperparameter selection; External validation = Cam-CAN + OASIS-3 "
-              f"(main result). Scan-level statistics; 95% CIs: percentile bootstrap, {args.n_boot:,} resamples "
+              "(main result)" + ("; Training = training set (--train-file), for comparison" if TRAIN in stats else "")
+              + f". Scan-level statistics; 95% CIs: percentile bootstrap, {args.n_boot:,} resamples "
               f"of participants (seed {args.seed}). Age bands include their lower bound. "
               "Gap = predicted − chronological age.\n\n")
     (out / "brainage_stats.md").write_text(header + aio.markdown_table(wide_df, index_label="Statistic") + "\n")
@@ -603,7 +641,7 @@ def main(argv=None) -> int:
                           ["_split", aio.COL_DATABASE, aio.COL_SUBJECT, aio.COL_SESSION, "_age", aio.COL_PRED, "gap"]]
     flagged.rename(columns={"_split": "split", "_age": "age_floored"}).to_csv(
         out / "scans_abs_gap_gt15.csv", index=False)
-    for gkey in GROUP_ORDER:
+    for gkey in groups:
         notes.append(f"{GROUP_LABELS[gkey]}: {stats[gkey]['N |gap|>15']:,} scan(s) with |gap| > {GAP_FLAG:g} "
                      "years (kept; listed in scans_abs_gap_gt15.csv).")
     (out / "checks.md").write_text("# Data checks\n\n" + "\n".join(f"- {n}" for n in notes) + "\n")

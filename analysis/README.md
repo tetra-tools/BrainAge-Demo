@@ -63,6 +63,14 @@ Outputs: `fig_brainage_scatter.pdf/.png` (16 cm wide, no title, PNG 300 dpi),
 Confidence intervals: percentile bootstrap resampling participants (`database/subject_id`),
 1,000 resamples, seed 2026.
 
+Training MAE (to compare with test and external validation, e.g. for overfitting): pass
+`--train-file path/to/training_predictions.tsv`, a table of the training set predicted by the
+final model, with the same columns (`sex` optional). It gets the same population rules (native,
+healthy, floored age) and adds a "Training" column to the tables, a line in the inset of panel
+(a) and a comparison sentence to the text. Use predictions of the final model on the native
+training scans, not the loss logged during training (augmented samples, dropout active).
+`checks.md` reports participants shared between training and test or external validation.
+
 ### `inventory_databases_diagnoses.py`
 
 Rows: native original scans of all participants. Outputs in `inventory/`: `databases.csv`,

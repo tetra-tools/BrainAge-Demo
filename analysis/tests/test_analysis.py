@@ -96,6 +96,32 @@ def test_figure_script(pred_dir, tmp_path):
 
     text = (tmp_path / "brainage_text_snippets.md").read_text()
     assert "external validation set" in text and "hyperparameter selection" in text
+    assert "Training" not in set(stats["group"]) and "training scans" not in text
+
+
+def test_figure_script_with_training(pred_dir, tmp_path):
+    rng = np.random.default_rng(5)
+    train = pd.DataFrame(_rows(rng, "train", ["adni", "ukb", "hcp"], 200, True, 20_000)).drop(columns="sex")
+    train_file = tmp_path / "predictions_train.tsv"
+    train.to_csv(train_file, sep="\t", index=False)
+    out = tmp_path / "out"
+    assert fig.main(["--pred-dir", str(pred_dir), "--out-dir", str(out), "--n-boot", "200",
+                     "--train-file", str(train_file)]) == 0
+    stats = pd.read_csv(out / "brainage_stats.csv")
+    native = train[(train["augmentation"] == "native") & train["is_original"]]
+    expected = (native["predicted_age_years"] - np.floor(native["age"])).abs().mean()
+    got = stats.query("group == 'Training' and statistic == 'MAE (years)'")["estimate"].item()
+    assert got == pytest.approx(expected)
+    assert "Training" in (out / "brainage_stats.md").read_text()
+    assert "native training scans" in (out / "brainage_text_snippets.md").read_text()
+    sub = pd.read_csv(out / "brainage_mae_by_subgroup.csv")
+    tr_sex = sub[(sub["group"] == "Training") & (sub["factor"] == "sex") & (sub["N rows"] > 0)]
+    assert set(tr_sex["level"]) == {"other / missing"}                      # no sex column in this file
+
+
+def test_figure_script_missing_training_file(pred_dir, tmp_path):
+    assert fig.main(["--pred-dir", str(pred_dir), "--out-dir", str(tmp_path),
+                     "--train-file", str(tmp_path / "nope.tsv")]) == 2
 
 
 def test_figure_script_bad_bins(pred_dir, tmp_path):

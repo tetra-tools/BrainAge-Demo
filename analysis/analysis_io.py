@@ -38,6 +38,7 @@ FILE_TEMPLATES = {
 SPLIT_TEST = "test"
 SPLIT_EXTERNAL = "validation"
 SPLITS = (SPLIT_TEST, SPLIT_EXTERNAL)
+SPLIT_TRAIN = "train"          # optional training-set table (--train-file)
 
 # Columns of the prediction tables
 COL_PRED = "predicted_age_years"
@@ -53,6 +54,9 @@ COL_NEURO_DX = "neurological_diagnosis"
 COL_PSYCH_DX = "psychiatric_diagnosis"
 REQUIRED_COLUMNS = [COL_PRED, COL_AGE, COL_SEX, COL_HEALTHY, COL_DATABASE, COL_SUBJECT,
                     COL_SESSION, COL_AUG, COL_ORIGINAL, COL_NEURO_DX, COL_PSYCH_DX]
+# The training table only needs what the MAE uses (sex is optional: missing -> "other / missing")
+TRAIN_REQUIRED_COLUMNS = [COL_PRED, COL_AGE, COL_HEALTHY, COL_DATABASE, COL_SUBJECT, COL_SESSION,
+                          COL_AUG, COL_ORIGINAL]
 
 # Per-file columns dropped by the forest-plot notebook before drop_duplicates()
 DROP_COLS = ["subject_image_count", "subject_sample_count", "image_augmentation", "apoe",
@@ -89,10 +93,25 @@ def read_all(pred_dir: Path, model_tag: str, notes: List[str]) -> pd.DataFrame:
     return pd.concat([read_split(pred_dir, s, model_tag, notes) for s in SPLITS], ignore_index=True)
 
 
+def read_training(path: Path, notes: List[str]) -> pd.DataFrame:
+    """All rows of the training-set prediction table (same format as the other tables)."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Training prediction table not found: {path}")
+    df = pd.read_csv(path, sep="\t")
+    missing = [c for c in TRAIN_REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"{path.name}: missing column(s) {missing}")
+    if COL_SEX not in df.columns:
+        df[COL_SEX] = None
+        notes.append(f"{path.name}: no '{COL_SEX}' column; training scans counted as sex 'other / missing'.")
+    notes.append(f"{SPLIT_TRAIN}/training_file: {len(df):,} rows read from {path.name}.")
+    return df.assign(_source="training_file", _split=SPLIT_TRAIN)
+
+
 def native_scans(raw: pd.DataFrame, notes: List[str]) -> pd.DataFrame:
     """Forest-plot rows: native original scans, healthy + prediction files, drop_duplicates()."""
     out = []
-    for split in SPLITS:
+    for split in raw["_split"].unique():
         d = raw[raw["_split"] == split]
         kept = d[(d[COL_AUG] == "native") & (d[COL_ORIGINAL] == True)]  # noqa: E712 (as notebook)
         cols = [c for c in kept.columns if c not in DROP_COLS and not c.startswith("_")]
