@@ -398,3 +398,73 @@ def test_r_demographics_stops_on_lost_scan(tmp_path):
     assert res.returncode != 0 and "no native original row" in res.stderr
     (tmp_path / "b").mkdir()
     assert _run_r(build_pred_dir(tmp_path / "b", modify), tmp_path / "out2", "--no-strict").returncode == 0
+
+
+# ---------------------------------------------------------------- longitudinal follow-up
+import fig_brainage_followup as fu  # noqa: E402
+
+
+def test_followup_groups_every_followed_participant(tmp_path):
+    changed = {}
+
+    def modify(split, source, df):
+        if split != "validation":
+            return df
+        followed = df[(df["session_id"] == "ses-2") & (df["augmentation"] == "native")]
+        if source == "healthy_file":            # healthy at ses-1, patient at ses-2 -> converter
+            subj = followed["subject_id"].iloc[-1]          # not one of the rows copied in the prediction file
+            changed["converter"] = subj
+            df.loc[(df["subject_id"] == subj) & (df["session_id"] == "ses-2"), "healthy"] = 0
+        else:                                   # patient at ses-1, healthy at ses-2 -> other
+            subj = followed.loc[followed["healthy"] == 0, "subject_id"].iloc[0]
+            changed["other"] = subj
+            df.loc[(df["subject_id"] == subj) & (df["session_id"] == "ses-2"), "healthy"] = 1
+        return df
+    d = build_pred_dir(tmp_path, modify)
+    out = tmp_path / "out"
+    assert fu.main(["--pred-dir", str(d), "--out-dir", str(out), "--n-boot", "50"]) == 0
+    part = pd.read_csv(out / "brainage_followup_participants.csv")
+    notes = []
+    native = aio.native_scans(aio.read_all(d, TAG, notes), notes)
+    ext = native[native["_split"] == "validation"]
+    sessions = ext.groupby(aio.subject_key(ext))["session_id"].nunique()
+    assert len(part) == int((sessions >= 2).sum())                       # nobody followed is lost
+    assert part["participant"].is_unique
+    group = part.set_index("participant")["group"]
+    db = ext.drop_duplicates("subject_id").set_index("subject_id")["database"]
+    assert group[f"{db[changed['converter']]}/{changed['converter']}"] == "Converter"
+    assert group[f"{db[changed['other']]}/{changed['other']}"] == "Other"
+    assert set(group) == {"Stable healthy", "Converter", "Patient", "Other"}
+    assert (part["follow-up (years)"] == 2).all() and part["rate (predicted years per year)"].notna().all()
+    stats = pd.read_csv(out / "brainage_followup_stats.csv")
+    allx = stats[stats["database"] == "All external"]
+    assert allx["participants"].sum() == len(part)
+    for name in ("fig_brainage_followup.pdf", "fig_brainage_followup.png", "brainage_followup_text.md"):
+        assert (out / name).stat().st_size > 0
+    curves = pd.read_csv(out / "brainage_followup_mean_curves.csv")
+    start = curves[curves["years since first scan"] == 0].set_index("group")
+    assert (start["mean change in predicted age"] == 0).all()             # every course starts at 0
+    for g, n in part["group"].value_counts().items():
+        assert start.loc[g, "participants"] == n                          # every participant in the curve
+    later = curves[curves["years since first scan"] == 2].set_index("group")
+    for g in later.index:
+        sub = part[part["group"] == g]
+        expected = (sub["last gap"] - sub["baseline gap"] + 2).mean()     # change in predicted age at 2 years
+        assert later.loc[g, "mean change in predicted age"] == pytest.approx(expected)
+
+
+def test_followup_without_longitudinal_data(tmp_path, capsys):
+    def modify(split, source, df):
+        return df[df["session_id"] == "ses-1"]
+    assert fu.main(["--pred-dir", str(build_pred_dir(tmp_path, modify)), "--out-dir", str(tmp_path / "o")]) == 1
+    assert "no participant with at least two sessions" in capsys.readouterr().err
+
+
+def test_conflicting_rows_for_one_scan_stop(tmp_path, capsys):
+    def modify(split, source, df):
+        if split == "test" and source == "prediction_file":   # copy of a healthy scan relabelled as patient
+            df.loc[df.index[-9:], "healthy"] = 0
+        return df
+    assert _run(build_pred_dir(tmp_path, modify), tmp_path / "out") == 2
+    err = capsys.readouterr().err
+    assert "several native original rows" in err and "healthy" in err

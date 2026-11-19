@@ -8,6 +8,7 @@ Docker image.
 |---|---|
 | `fig_brainage_scatter.py` | predicted vs chronological age figure (healthy, native scans), statistics with bootstrap CIs, MAE by age band / sex / augmentation, thesis text |
 | `inventory_databases_diagnoses.py` | tables of all databases and of all raw neurological / psychiatric diagnoses before cleaning, with their grouping |
+| `fig_brainage_followup.py` | longitudinal course of predicted age (external validation, participants with ≥ 2 sessions): stable healthy, converters, patients |
 | `demographics_tables.R` | demographics tables by split (subject level and scan level, `.docx`), diagnosis flag counts |
 
 Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does) and
@@ -80,6 +81,22 @@ Rows: native original scans of all participants. Outputs in `inventory/`: `datab
 `diagnoses_raw.csv` (each raw value with the groups assigned), `diagnosis_tokens.csv` (rule
 applied to each token, including tokens that are not mapped), `diagnosis_groups.csv`, and
 `inventory.md` with all tables.
+
+### `fig_brainage_followup.py`
+
+```bash
+python analysis/fig_brainage_followup.py           # -> results/analysis/followup/
+```
+
+Participants of the external validation set (`--split`) with at least two sessions, native
+scans of healthy participants and patients. Group from `healthy` at the first and last session
+(age order): stable healthy (1 → 1, never 0), converter (1 → 0), patient (0 → 0, never 1), other
+(any other sequence: counted, not plotted). Figure: (a–c) one line per participant, change in
+predicted age since the first scan vs years since the first scan, with the group mean curve and
+its 95% CI (drawn where at least `--min-n` participants contribute, default 5); (d) the three
+mean curves. Ages are whole years, so sessions within the same year share a time point.
+Outputs: figure (PDF + PNG), `brainage_followup_mean_curves.csv`, per-participant table with
+the rate of change, summary table per database and group, legend, `checks.md`.
 
 ### `demographics_tables.R`
 

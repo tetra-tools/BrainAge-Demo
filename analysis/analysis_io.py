@@ -211,6 +211,16 @@ def audit_labels(raw: pd.DataFrame, native: pd.DataFrame) -> Tuple[List[str], Li
             errors.append(f"{split}: {len(lost):,} scans have no native original row and are dropped: "
                           f"{_examples(lost)}; their rows (augmentation, is_original): {seen}.")
 
+    # one native row per scan: several rows that differ (e.g. healthy in one file, patient in the other)
+    keys = native["_split"].astype(str) + "|" + scan_key(native)
+    multi = native[keys.duplicated(keep=False)]
+    if len(multi):
+        cols = [c for c in (COL_HEALTHY, COL_AGE, COL_PRED, COL_SEX, COL_NEURO_DX, COL_PSYCH_DX) if c in multi.columns]
+        k = keys[multi.index]
+        differ = [c for c in cols if (multi[c].astype(str).groupby(k).nunique() > 1).any()]
+        errors.append(f"{k.nunique():,} scans have several native original rows (in columns {differ or 'per-file only'}), "
+                      f"so they would be counted more than once: {_examples(sorted(set(k)))}.")
+
     # healthy must be 0 or 1 on native scans
     bad_h = ~native[COL_HEALTHY].isin([0, 1])
     if bad_h.any():

@@ -327,8 +327,8 @@ def _style(ax):
     ax.set_axisbelow(True)
 
 
-def _letter(ax, letter):
-    ax.annotate(letter, xy=(0, 1), xycoords="axes fraction", xytext=(-26, 6),
+def _letter(ax, letter, dy=6):
+    ax.annotate(letter, xy=(0, 1), xycoords="axes fraction", xytext=(-26, dy),
                 textcoords="offset points", fontsize=FS["letter"], fontweight="bold",
                 ha="left", va="bottom")
 
