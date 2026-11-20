@@ -544,3 +544,84 @@ def test_r_demographics_sex_apoe_followup_and_duplicates(tmp_path):
     assert (counts["CN participants (healthy == 1)"], counts["CN scans (healthy == 1)"]) == (5, 6)   # people, not rows
     f = pd.read_csv(tmp_path / "out" / "diagnosis_flag_counts.tsv", sep="\t").set_index("flag")
     assert f.loc["psych_flag_MDD", "n_positive_validation"] == 1 == f.loc["psych_flag_Anxiety", "n_positive_validation"]
+
+
+def _decimal_ages(split, source, df):
+    df["age"] = df["age"] + 0.7                                         # e.g. 70.7 must be analysed as 70
+    return df
+
+
+def test_inventory_floors_age(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_decimal_ages)
+    assert inv.main(["--pred-dir", str(d), "--out-dir", str(tmp_path / "o")]) == 0
+    dbs = pd.read_csv(tmp_path / "o" / "inventory" / "databases.csv")
+    for col in ("age min", "age max"):
+        assert (dbs[col] == np.floor(dbs[col])).all(), col
+
+
+@needs_r
+def test_r_demographics_floors_age(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_decimal_ages)
+    res = _run_r(d, tmp_path / "o")
+    assert res.returncode == 0, res.stderr
+    for name in ("scan_level.tsv", "subject_level.tsv"):
+        age = pd.read_csv(tmp_path / "o" / name, sep="\t")["age"]
+        assert (age == np.floor(age)).all(), name
+    subjects = pd.read_csv(tmp_path / "o" / "subject_level.tsv", sep="\t")
+    multi = subjects["followup_multi"].dropna()
+    assert len(multi) and (multi == np.floor(multi)).all()              # follow-up from floored ages
+
+
+def _repeated_flip(split, source, df):
+    """Two identical flipped copies of one scan in the healthy file (same text, same prediction)."""
+    if source == "healthy_file":
+        row = df[(df["augmentation"] == "flip")].iloc[[0]]
+        df = pd.concat([df, row], ignore_index=True)
+    return df
+
+
+def test_identical_copies_within_a_file_are_kept(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_repeated_flip)
+    raw = aio.read_all(d, TAG, [])
+    kept = aio.drop_cross_file_copies(raw)
+    assert len(raw) - len(kept) == 2 * 9                                # 9 healthy rows copied per split
+    assert (kept["_source"] == "prediction_file").sum() == (raw["_source"] == "prediction_file").sum() - 18
+    for split in aio.SPLITS:
+        r = kept[(kept["_split"] == split) & (kept["augmentation"] == "flip")]
+        assert r.drop(columns=["_source", "_split"]).duplicated(keep=False).sum() == 2   # both copies kept
+
+
+@needs_r
+def test_r_counts_identical_copies_within_a_file(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_repeated_flip)
+    res = _run_r(d, tmp_path / "o")
+    assert res.returncode == 0, res.stderr
+    scans = pd.read_csv(tmp_path / "o" / "scan_level.tsv", sep="\t", dtype={"subject_id": str})
+    assert scans["n_samples"].value_counts().to_dict() == {3: len(scans) - 2, 4: 2}   # one scan per split
+    assert (scans.loc[scans["n_samples"] == 4, "aug_Flip"] == 2).all()
+    assert (scans.loc[scans["n_samples"] == 3, "aug_Flip"] == 1).all()
+
+
+def test_scatter_and_followup_floor_decimal_ages(tmp_path):
+    """Ages stored with decimals give whole-year ages in every output (floored, never rounded)."""
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_decimal_ages)          # e.g. 70.7 -> 70
+    (tmp_path / "ref").mkdir()
+    ref = build_pred_dir(tmp_path / "ref")                              # same tables, whole-year ages
+    out, out_ref = tmp_path / "o", tmp_path / "o_ref"
+    assert _run(d, out) == 0
+    assert _run(ref, out_ref) == 0
+    a = pd.read_csv(out / "brainage_stats.csv")
+    b = pd.read_csv(out_ref / "brainage_stats.csv")
+    pd.testing.assert_series_equal(a["estimate"], b["estimate"])         # same results as whole-year ages
+    for stat in ("Chronological age, min (years)", "Chronological age, max (years)"):
+        v = a.loc[a["statistic"] == stat, "estimate"]
+        assert (v == np.floor(v)).all()
+    assert fu.main(["--pred-dir", str(d), "--out-dir", str(tmp_path / "fu"), "--n-boot", "50"]) == 0
+    part = pd.read_csv(tmp_path / "fu" / "brainage_followup_participants.csv")
+    for col in ("baseline age", "last age", "follow-up (years)"):
+        assert (part[col] == np.floor(part[col])).all(), col
