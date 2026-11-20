@@ -191,7 +191,7 @@ def proposed_group_table(df: pd.DataFrame, splits) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     for split in splits:
         merged = dc.rare_groups(dict(zip(out["group"], out[f"scans {split}"])))
-        out[f"merged into (< {dc.MIN_SCANS} scans) {split}"] = out["group"].map(merged).fillna("")
+        out[f"merged into (< {dc.MIN_SCANS} scans) {split}"] = out["group"].map(lambda g: merged.get(g, ""))
     order = {g: i for i, g in enumerate(dc.all_groups() + [dc.UNCLASSIFIED, "No group, healthy (healthy == 1)"])}
     out["_o"] = out["group"].map(order).fillna(len(order))
     return out.sort_values("_o").drop(columns="_o").reset_index(drop=True)
