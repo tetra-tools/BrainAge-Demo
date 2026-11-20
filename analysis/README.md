@@ -7,12 +7,37 @@ Docker image.
 | Script | Output |
 |---|---|
 | `fig_brainage_scatter.py` | predicted vs chronological age figure (healthy, native scans), statistics with bootstrap CIs, MAE by age band / sex / augmentation, thesis text |
-| `inventory_databases_diagnoses.py` | tables of all databases and of all raw neurological / psychiatric diagnoses before cleaning, with their grouping |
+| `inventory_databases_diagnoses.py` | tables of all databases and of all raw neurological / psychiatric diagnoses before cleaning, with their grouping; correspondence table of the proposed classification with counts |
 | `fig_brainage_followup.py` | longitudinal course of predicted age (external validation, participants with ≥ 2 sessions): stable healthy, converters, patients |
-| `demographics_tables.R` | demographics tables by split (subject level and scan level, `.docx`), diagnosis flag counts |
+| `demographics_tables.R` | demographics tables by split (subject level and scan level with the proposed diagnosis groups, `.docx`), group and Figure 13 flag counts |
 
-Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does) and
-`diagnosis_groups.py` (diagnosis cleaning and grouping rules copied from the forest-plot notebook).
+Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does),
+`diagnosis_groups.py` (diagnosis cleaning and grouping rules copied from the forest-plot notebook)
+and `diagnosis_classification.py` (proposed classification, below).
+
+## Proposed diagnosis classification
+
+`diagnosis_terms.csv` lists every diagnosis term with its type and group; Python
+(`diagnosis_classification.py`) and R (`demographics_tables.R`) read it and apply the same rules.
+To move a term, edit its row. Terms are matched without case; a term absent from the table sets
+no group and is reported.
+
+| Type | Group set |
+|---|---|
+| `CN` | none (cognitively normal / healthy) |
+| `GROUP`, `OTHER_DISEASE` | always |
+| `SYMPTOM` | `Other_neuro_symptom` / `Other_psych_symptom`, only if the cell has no disease of the same domain |
+| `MOVEMENT_SYNDROME` | `Movement_disorder`, unless Parkinson, Mutation_PD, Prodromal_PD or Atypical_parkinsonism is in the cell |
+| `PPA` | `MCI` if no neurological disease is in the cell (with FTD or AD, that disease) |
+| `DEMENTIA` | the cause written in the cell; with only an attributed cause or Other Cognitive Disorder, `Other_neuro_disease`; with no cause, `Dementia_unspecified` |
+| `OTHER_COGNITIVE`, `ATTRIBUTION` | `Other_neuro_disease` if no other neurological disease is in the cell; otherwise a descriptor |
+| `DESCRIPTOR`, `MISSING` | none |
+
+A term counts in the domain of its meaning, whatever the column it is written in (a depression in
+the neurological column counts as `Depression`). A scan's groups are those of both columns.
+Patients (`healthy == 0`) left without any group are `Unclassified_patient`. Groups with fewer
+than 30 scans in a split are marked as merged into `Other_neuro_disease` / `Other_psych_disease`
+(for models); counts are never merged. Figure 13 still uses the notebook rules.
 
 Age: every script uses chronological age floored to whole years (design: the model is trained on
 floored ages). The prediction TSVs already hold whole years; the scripts floor again so that a
@@ -83,8 +108,11 @@ training scans, not the loss logged during training (augmented samples, dropout 
 
 Rows: native original scans of all participants. Outputs in `inventory/`: `databases.csv`,
 `diagnoses_raw.csv` (each raw value with the groups assigned), `diagnosis_tokens.csv` (rule
-applied to each token, including tokens that are not mapped), `diagnosis_groups.csv`, and
-`inventory.md` with all tables.
+applied to each token, including tokens that are not mapped), `diagnosis_groups.csv`,
+`diagnosis_correspondence.csv` (proposed classification: each term found, its type, group and
+condition, the notebook rule, scans and participants per split), `diagnosis_groups_proposed.csv`
+(scans per proposed group, both columns together, with the Other group a split merges it into and
+`Unclassified_patient`), and `inventory.md` with all tables.
 
 ### `fig_brainage_followup.py`
 
@@ -115,14 +143,18 @@ APOE, sessions, samples (native + augmented, rows present in both files counted 
 follow-up duration in two rows (all subjects with single session = 0; subjects with at least
 two sessions only). Sex: female/male in any case; a missing value is filled from the same
 participant's other scans when they agree. APOE: 0 = non-carrier, > 0 = carrier; -1, -1.0,
-`Unknown`, empty and NA = unknown. Scan level: status, age, diagnosis flags, augmented samples
-per transform. `diagnosis_flag_counts.tsv` counts flags as Figure 13 (`n_positive`: all native
-scans of the split), with the number of healthy scans among them. `split_counts.tsv` gives
+`Unknown`, empty and NA = unknown. Scan level: status, age, proposed diagnosis groups (one row
+per group present; a scan can be in several), augmented samples per transform.
+`diagnosis_group_counts.tsv` gives scans, participants and healthy scans per proposed group and
+split, and the Other group a split merges it into (< 30 scans). `diagnosis_flag_counts.tsv`
+counts the notebook flags as Figure 13 (`n_positive`: all native scans of the split), with the
+number of healthy scans among them, to cross-check the Figure 13 labels. `--terms` reads another
+correspondence table. `split_counts.tsv` gives
 scans, participants and CN participants (healthy == 1) per split; `demographics_checks.txt`
 repeats them and lists every raw sex and APOE value with its coded category.
 It stops on the same labelling problems as the Python scripts (`--no-strict` to only report
-them) and writes `subject_level.tsv`, `scan_level.tsv`, `diagnosis_flag_counts.tsv` and
-`demographics_checks.txt`; `--no-tables` skips the `.docx` tables.
+them) and writes `subject_level.tsv`, `scan_level.tsv`, `diagnosis_group_counts.tsv`,
+`diagnosis_flag_counts.tsv` and `demographics_checks.txt`; `--no-tables` skips the `.docx` tables.
 
 ## No scan lost
 

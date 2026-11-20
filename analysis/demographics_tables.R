@@ -3,7 +3,7 @@
 #
 # Usage (from the repository root):
 #   Rscript analysis/demographics_tables.R [--pred-dir DIR] [--out-dir DIR] [--model-tag TAG]
-#                                          [--no-tables] [--no-strict]
+#                                          [--terms FILE] [--no-tables] [--no-strict]
 #   defaults: --pred-dir data/predictions  --out-dir results/analysis/demographics  (relative to the repo root)
 #
 # Reads the prediction tables of ONE model (predictions_<split>_<tag>.tsv and
@@ -14,12 +14,19 @@
 #   split_counts.tsv                     scans, participants and CN participants (healthy == 1) per split
 #   diagnosis_flag_counts.tsv            native scans per diagnosis flag and split, counted as the
 #                                        Figure 13 forest plot (n_positive), and how many are healthy
+#   diagnosis_group_counts.tsv           native scans and participants per proposed diagnosis group
+#                                        (analysis/diagnosis_terms.csv) and split, healthy scans, the
+#                                        Other group a split merges it into (< 30 scans), and the
+#                                        patients without any group (Unclassified_patient)
 #   demographics_checks.txt              counts and label checks
 #
 # Splits: train = Training; test = Test (hyperparameter selection);
 #         validation = External validation (camcan, oasis3; main result).
-# Diagnosis flags use the rules of the Figure 13 notebook (analysis/diagnosis_groups.py):
-# tokens split on , ; | ; exact case-insensitive patterns; AD detected on the whole string.
+# Two diagnosis classifications:
+#  - Figure 13 flags (neuro_flag_*, psych_flag_*): the rules of the notebook (analysis/diagnosis_groups.py),
+#    kept to cross-check the Figure 13 labels (diagnosis_flag_counts.tsv);
+#  - proposed groups (group_*): analysis/diagnosis_terms.csv with the rules of
+#    analysis/diagnosis_classification.py; these are the "Diagnosis group" rows of the scan table.
 
 suppressPackageStartupMessages({
   library(readr)
@@ -110,6 +117,108 @@ dx_groups <- function(dx, domain) {
   groups
 }
 
+# ---------------------------------------------------------------- proposed classification
+# Same rules as analysis/diagnosis_classification.py (R1-R10), from the same table.
+TERM_TYPES <- c("CN", "GROUP", "OTHER_DISEASE", "SYMPTOM", "MOVEMENT_SYNDROME", "PPA", "DEMENTIA",
+                "OTHER_COGNITIVE", "ATTRIBUTION", "DESCRIPTOR", "MISSING")
+CAUSES_OF_DEMENTIA <- c("AD", "Vascular", "FTD", "Atypical_parkinsonism", "Parkinson", "NPH", "TBI")
+EXPLAINS_PARKINSONISM <- c("Parkinson", "Mutation_PD", "Prodromal_PD", "Atypical_parkinsonism")
+OTHER_DISEASE <- c(neurological = "Other_neuro_disease", psychiatric = "Other_psych_disease")
+ALWAYS_KEPT <- c("Other_neuro_disease", "Other_psych_disease", "Other_neuro_symptom", "Other_psych_symptom")
+UNCLASSIFIED <- "Unclassified_patient"
+MIN_SCANS <- 30
+
+load_terms <- function(path) {
+  terms <- read_csv(path, col_types = cols(.default = col_character()), na = character(), progress = FALSE,
+                    locale = locale(encoding = "UTF-8"))
+  terms$key <- tolower(str_trim(terms$term))
+  bad <- setdiff(unique(terms$type), TERM_TYPES)
+  if (length(bad)) stop(basename(path), ": unknown type(s) ", paste(bad, collapse = ", "), call. = FALSE)
+  if (anyDuplicated(terms$key)) stop(basename(path), ": terms listed twice: ",
+                                     paste(unique(terms$key[duplicated(terms$key)]), collapse = ", "), call. = FALSE)
+  terms
+}
+
+split_terms <- function(dx) {
+  if (is.na(dx) || dx == "") return(character(0))
+  toks <- str_trim(str_split(str_replace_all(dx, "[;|]", ","), fixed(","))[[1]])
+  toks[toks != ""]
+}
+
+classify_cell <- function(dx, terms) {
+  toks <- split_terms(dx)
+  idx <- match(tolower(toks), terms$key)
+  typ <- ifelse(is.na(idx), "UNMAPPED", terms$type[idx])
+  grp <- terms$group[idx]
+  dom <- terms$domain[idx]
+  disease <- typ %in% c("GROUP", "OTHER_DISEASE")
+  neuro <- unique(grp[disease & dom %in% "neurological"])
+  psych <- unique(grp[disease & dom %in% "psychiatric"])
+  if ("DEMENTIA" %in% typ && !any(neuro %in% CAUSES_OF_DEMENTIA)) {               # R6
+    neuro <- c(neuro, if (any(typ %in% c("ATTRIBUTION", "OTHER_COGNITIVE"))) OTHER_DISEASE[["neurological"]]
+                      else "Dementia_unspecified")
+  }
+  if (any(typ %in% c("OTHER_COGNITIVE", "ATTRIBUTION")) && !length(neuro)) neuro <- OTHER_DISEASE[["neurological"]]
+  if ("MOVEMENT_SYNDROME" %in% typ && !any(neuro %in% EXPLAINS_PARKINSONISM)) neuro <- c(neuro, "Movement_disorder")
+  if ("PPA" %in% typ && !length(neuro)) neuro <- "MCI"                              # R7
+  if (!length(neuro)) neuro <- unique(grp[typ == "SYMPTOM" & dom %in% "neurological"])   # R5
+  if (!length(psych)) psych <- unique(grp[typ == "SYMPTOM" & dom %in% "psychiatric"])
+  list(groups = unique(c(neuro, psych)), unmapped = toks[is.na(idx)])
+}
+
+all_groups <- function(terms) {
+  g <- terms[terms$group != "" & terms$type != "CN", ]
+  c(unique(g$group[g$domain == "neurological"]), unique(g$group[g$domain == "psychiatric"]))
+}
+
+group_domain <- function(group, terms) {
+  vapply(group, function(x) {
+    if (x == UNCLASSIFIED) return("both")
+    d <- terms$domain[terms$group == x & terms$domain != ""]
+    if (length(d)) d[1] else ""
+  }, character(1), USE.NAMES = FALSE)
+}
+
+add_groups <- function(scans, terms) {
+  # one logical column per proposed group (both diagnosis columns of a scan together), and
+  # Unclassified_patient for patients (healthy == 0) left without any group
+  pairs <- distinct(scans, neurological_diagnosis, psychiatric_diagnosis)
+  res <- map2(pairs$neurological_diagnosis, pairs$psychiatric_diagnosis, function(n, p) {
+    a <- classify_cell(n, terms)
+    b <- classify_cell(p, terms)
+    list(groups = unique(c(a$groups, b$groups)), unmapped = c(a$unmapped, b$unmapped))
+  })
+  pairs$groups <- map(res, "groups")
+  pairs$unmapped <- map_chr(res, ~ paste(unique(.x$unmapped), collapse = "; "))
+  scans <- left_join(scans, pairs, by = c("neurological_diagnosis", "psychiatric_diagnosis"))
+  for (g in all_groups(terms)) scans[[paste0("group_", g)]] <- vapply(scans$groups, function(x) g %in% x, logical(1))
+  scans[[paste0("group_", UNCLASSIFIED)]] <- lengths(scans$groups) == 0 & scans$healthy %in% 0
+  scans %>% rename(unmapped_terms = unmapped) %>% select(-groups)
+}
+
+group_counts <- function(scans, terms) {
+  long <- scans %>%
+    select(split, database, subject_id, healthy, starts_with("group_")) %>%
+    pivot_longer(starts_with("group_"), names_to = "group", values_to = "value") %>%
+    filter(value) %>%
+    mutate(group = str_remove(group, "^group_"))
+  if (!nrow(long)) return(tibble(group = character(0)))
+  counts <- long %>% group_by(group, split) %>%
+    summarise(scans = n(), participants = n_distinct(paste(database, subject_id)),
+              healthy = sum(healthy == 1), .groups = "drop")
+  merged <- counts %>%
+    mutate(domain = group_domain(group, terms),
+           merged_into = if_else(scans < MIN_SCANS & !group %in% c(ALWAYS_KEPT, UNCLASSIFIED) &
+                                   domain %in% names(OTHER_DISEASE), unname(OTHER_DISEASE[domain]), "")) %>%
+    select(group, split, merged_into)
+  out <- counts %>% left_join(merged, by = c("group", "split")) %>%
+    pivot_wider(names_from = split, values_from = c(scans, participants, healthy, merged_into),
+                names_glue = "{.value}_{split}")
+  order <- c(all_groups(terms), UNCLASSIFIED)
+  out %>% mutate(domain = group_domain(group, terms), .after = group) %>%
+    arrange(match(group, order))
+}
+
 add_flags <- function(scans) {
   neuro <- lapply(scans$neurological_diagnosis, dx_groups, domain = "neuro")
   psych <- lapply(scans$psychiatric_diagnosis, dx_groups, domain = "psych")
@@ -155,7 +264,7 @@ as_flag <- function(x) {
   case_when(v %in% c("true", "1", "1.0") ~ TRUE, v %in% c("false", "0", "0.0") ~ FALSE, TRUE ~ NA)
 }
 
-prepare <- function(raw) {
+prepare <- function(raw, terms) {
   problems <- character(0)
   warnings <- character(0)
   required <- c("subject_id", "session_id", "database", "split", "augmentation", "is_original", "age",
@@ -274,7 +383,11 @@ prepare <- function(raw) {
            apoe = coalesce(code_apoe(apoe), "Unknown")) %>%
     select(-sex_norm, -sex_known) %>%
     left_join(per_scan, by = "scan_key") %>%
-    add_flags()
+    add_flags() %>%
+    add_groups(terms)
+  unmapped <- unique(unlist(str_split(scans$unmapped_terms[scans$unmapped_terms != ""], "; ")))
+  if (length(unmapped)) warnings <- c(warnings, sprintf(
+    "diagnosis terms not in diagnosis_terms.csv (no proposed group; add them to the table): %s", show(unmapped, 50)))
   list(scans = scans, problems = problems, warnings = warnings, rows_read = nrow(raw), rows_distinct = nrow(rows))
 }
 
@@ -350,17 +463,21 @@ make_tables <- function(subjects, scans, out_dir) {
     as_gt() %>%
     gt::gtsave(filename = file.path(out_dir, "demographics_table_split.docx"))
 
+  # proposed diagnosis groups present in the data (a scan can be in several groups)
+  present <- names(scans)[startsWith(names(scans), "group_")]
+  present <- present[vapply(present, function(g) any(scans[[g]]), logical(1))]
   sc <- scans %>%
-    select(split, healthy, age, starts_with("neuro_flag_"), starts_with("psych_flag_"), starts_with("aug_")) %>%
+    select(split, healthy, age, all_of(present), starts_with("aug_")) %>%
     mutate(split = split_factor(split),
            healthy = factor(healthy, levels = c(0, 1), labels = c("Non-healthy", "Healthy"))) %>%
-    rename_with(~ str_replace_all(str_replace(.x, "^(neuro|psych)_flag_", "Diagnosis: "), "_", " "),
-                matches("_flag_")) %>%
+    rename_with(~ paste0("Diagnosis group: ", str_replace_all(str_remove(.x, "^group_"), "_", " ")),
+                starts_with("group_")) %>%
     rename_with(~ str_replace(.x, "^aug_", "Augmented samples with "), starts_with("aug_"))
   tbl_summary(
     sc, by = split, missing = "ifany", statistic = stat, digits = all_continuous() ~ 2,
-    type = list(age ~ "continuous", starts_with("Augmented samples") ~ "continuous"),
-    include = c(healthy, age, starts_with("Diagnosis: "), starts_with("Augmented samples")),
+    type = list(age ~ "continuous", starts_with("Diagnosis group: ") ~ "dichotomous",
+                starts_with("Augmented samples") ~ "continuous"),
+    include = c(healthy, age, starts_with("Diagnosis group: "), starts_with("Augmented samples")),
     label = list(healthy ~ "Status", age ~ "Age at session (years)")) %>%
     add_overall() %>%
     as_gt() %>%
@@ -369,6 +486,12 @@ make_tables <- function(subjects, scans, out_dir) {
 }
 
 # ---------------------------------------------------------------- main
+script_dir <- function() {
+  file_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+  if (length(file_arg)) return(normalizePath(dirname(sub("^--file=", "", file_arg[1]))))
+  file.path(getwd(), "analysis")
+}
+
 repo_root <- function() {
   file_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
   if (length(file_arg)) return(normalizePath(file.path(dirname(sub("^--file=", "", file_arg[1])), "..")))
@@ -376,13 +499,14 @@ repo_root <- function() {
 }
 
 parse_args <- function(args) {
-  opts <- list(pred_dir = NULL, out_dir = NULL, model_tag = DEFAULT_MODEL_TAG, tables = TRUE, strict = TRUE)
+  opts <- list(pred_dir = NULL, out_dir = NULL, model_tag = DEFAULT_MODEL_TAG, terms = NULL, tables = TRUE,
+               strict = TRUE)
   i <- 1
   while (i <= length(args)) {
     key <- args[i]
     if (key %in% c("-h", "--help")) {
       cat("Rscript analysis/demographics_tables.R [--pred-dir DIR] [--out-dir DIR] [--model-tag TAG]",
-          "[--no-tables] [--no-strict]\n")
+          "[--terms analysis/diagnosis_terms.csv] [--no-tables] [--no-strict]\n")
       quit(status = 0)
     }
     if (key == "--no-tables") { opts$tables <- FALSE; i <- i + 1; next }
@@ -392,6 +516,7 @@ parse_args <- function(args) {
     if (key == "--pred-dir") opts$pred_dir <- val
     else if (key == "--out-dir") opts$out_dir <- val
     else if (key == "--model-tag") opts$model_tag <- val
+    else if (key == "--terms") opts$terms <- val
     else stop("unknown option ", key, call. = FALSE)
     i <- i + 2
   }
@@ -405,7 +530,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   out_dir <- if (is.null(opts$out_dir)) file.path(root, "results", "analysis", "demographics") else opts$out_dir
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-  prep <- prepare(read_predictions(pred_dir, opts$model_tag))
+  terms <- load_terms(if (is.null(opts$terms)) file.path(script_dir(), "diagnosis_terms.csv") else opts$terms)
+  prep <- prepare(read_predictions(pred_dir, opts$model_tag), terms)
   if (length(prep$problems) && opts$strict) {
     stop("labelling/encoding problems would drop scans (use --no-strict to only report them):\n  - ",
          paste(prep$problems, collapse = "\n  - "), call. = FALSE)
@@ -416,6 +542,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   write_tsv(scans %>% select(-scan_key), file.path(out_dir, "scan_level.tsv"))
   counts <- flag_counts(scans)
   write_tsv(counts, file.path(out_dir, "diagnosis_flag_counts.tsv"))
+  groups <- group_counts(scans, terms)
+  write_tsv(groups, file.path(out_dir, "diagnosis_group_counts.tsv"))
 
   # one row per native scan here; participants = distinct database + subject_id
   per_split <- scans %>% group_by(split) %>%
@@ -431,6 +559,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     capture.output(print(as.data.frame(count(scans, split, sex_raw, sex_filled, sex)), row.names = FALSE)),
     "", "Every raw APOE value (native scans) and how it was coded:",
     capture.output(print(as.data.frame(count(scans, apoe_raw, apoe)), row.names = FALSE)), "",
+    "Proposed diagnosis groups (native scans; Other group if < 30 scans in a split):",
+    capture.output(print(as.data.frame(groups), row.names = FALSE)), "",
     sprintf("ERROR: %s", prep$problems), sprintf("WARNING: %s", prep$warnings))
   writeLines(checks, file.path(out_dir, "demographics_checks.txt"))
   cat(checks, sep = "\n")

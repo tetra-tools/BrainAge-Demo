@@ -11,7 +11,15 @@ files, ``drop_duplicates``), keeps every participant (healthy and clinical), and
                         notebook rules (analysis/diagnosis_groups.py)
   diagnosis_tokens.csv  every token after splitting on , ; | : rule applied and group
   diagnosis_groups.csv  groups after cleaning: scans and participants per split, databases
-  inventory.md          the four tables in Markdown
+  diagnosis_correspondence.csv
+                        proposed classification (analysis/diagnosis_terms.csv): every term found in
+                        each column with its type, group, the notebook rule, and scans/participants
+                        per split
+  diagnosis_groups_proposed.csv
+                        scans per proposed group (both columns of a scan together), participants,
+                        healthy scans, the Other group a split merges it into (< 30 scans), and the
+                        patients left without any group (Unclassified_patient)
+  inventory.md          all tables in Markdown
 
 Example (from the repository root):
   python analysis/inventory_databases_diagnoses.py --pred-dir data/predictions
@@ -27,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 import analysis_io as aio
+import diagnosis_classification as dc
 import diagnosis_groups as dg
 
 DX_COLUMNS = {"neuro": aio.COL_NEURO_DX, "psych": aio.COL_PSYCH_DX}
@@ -77,6 +86,7 @@ def raw_diagnosis_table(df: pd.DataFrame, splits) -> pd.DataFrame:
                          **_split_counts(f, splits),
                          "healthy == 1 scans": int((f[aio.COL_HEALTHY] == 1).sum()),
                          "groups (notebook rules)": " + ".join(groups) if groups else "",
+                         "groups (proposed)": " + ".join(sorted(_cell_groups(original))),
                          "CN flag": is_cn,
                          "all tokens excluded": dg._all_tokens_excluded(original, domain),
                          "databases": _db_list(f)})
@@ -122,6 +132,71 @@ def group_table(df: pd.DataFrame, splits) -> pd.DataFrame:
             .drop(columns="_total").reset_index(drop=True))
 
 
+def _cell_groups(dx) -> set:
+    flags, _, _ = dc.classify_cell(dx)
+    return flags[dc.NEURO] | flags[dc.PSYCH]
+
+
+def correspondence_table(df: pd.DataFrame, splits) -> pd.DataFrame:
+    """Every term found in each diagnosis column, with the proposed classification and counts."""
+    rows = []
+    for domain, col in DX_COLUMNS.items():
+        tok = df[[col, "_subject", "_split"]].copy()
+        tok["term"] = tok[col].map(lambda v: sorted(set(dc.split_terms(v))))
+        tok = tok.explode("term").dropna(subset=["term"])
+        for term, f in tok.groupby("term", sort=False):
+            typ, group, dom = dc.term_info(term)
+            rule, nb_group = dg.token_rule(term, domain)
+            rows.append({"column": dg.DOMAINS[domain], "term": term, "type": typ, "group (proposed)": group,
+                         "condition": dc.TYPE_CONDITION[typ], "domain (proposed)": dom,
+                         "notebook rule": rule, "notebook group": nb_group,
+                         "scans": len(f), "participants": f["_subject"].nunique(), **_split_counts(f, splits)})
+    order = {t: i for i, t in enumerate(["CN", "GROUP", "DEMENTIA", "PPA", "MOVEMENT_SYNDROME", "OTHER_DISEASE",
+                                         "OTHER_COGNITIVE", "ATTRIBUTION", "SYMPTOM", "DESCRIPTOR", "MISSING",
+                                         "UNMAPPED"])}
+    out = pd.DataFrame(rows)
+    out["_t"] = out["type"].map(order)
+    return (out.sort_values(["column", "_t", "scans"], ascending=[True, True, False])
+            .drop(columns="_t").reset_index(drop=True))
+
+
+def scan_group_labels(df: pd.DataFrame) -> pd.Series:
+    """Proposed groups of each scan (both columns), as a frozenset; computed once per distinct pair."""
+    pairs = df[[aio.COL_NEURO_DX, aio.COL_PSYCH_DX]].astype(object).where(
+        df[[aio.COL_NEURO_DX, aio.COL_PSYCH_DX]].notna(), None)
+    cache = {}
+    out = []
+    for n, p in zip(pairs[aio.COL_NEURO_DX], pairs[aio.COL_PSYCH_DX]):
+        if (n, p) not in cache:
+            cache[(n, p)] = dc.scan_groups(n, p)
+        out.append(cache[(n, p)])
+    return pd.Series(out, index=df.index)
+
+
+def proposed_group_table(df: pd.DataFrame, splits) -> pd.DataFrame:
+    """Scans per proposed group, counted on whole scans (both columns together)."""
+    groups = scan_group_labels(df)
+    healthy = df[aio.COL_HEALTHY] == 1
+    labels = []
+    for g, h in zip(groups, healthy):
+        if g:
+            labels.append(sorted(g))
+        else:
+            labels.append(["No group, healthy (healthy == 1)" if h else dc.UNCLASSIFIED])
+    long = df[["_subject", "_split", aio.COL_DATABASE, aio.COL_HEALTHY]].assign(group=labels).explode("group")
+    rows = []
+    for group, f in long.groupby("group", sort=False):
+        rows.append({"group": group, "domain": dc.group_domain(group), **_split_counts(f, splits),
+                     "healthy == 1 scans": int((f[aio.COL_HEALTHY] == 1).sum()), "databases": _db_list(f)})
+    out = pd.DataFrame(rows)
+    for split in splits:
+        merged = dc.rare_groups(dict(zip(out["group"], out[f"scans {split}"])))
+        out[f"merged into (< {dc.MIN_SCANS} scans) {split}"] = out["group"].map(merged).fillna("")
+    order = {g: i for i, g in enumerate(dc.all_groups() + [dc.UNCLASSIFIED, "No group, healthy (healthy == 1)"])}
+    out["_o"] = out["group"].map(order).fillna(len(order))
+    return out.sort_values("_o").drop(columns="_o").reset_index(drop=True)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--pred-dir", help=f"folder with the prediction TSVs (default: <repo>/{aio.DEFAULT_PRED_DIR})")
@@ -161,12 +236,18 @@ def main(argv=None) -> int:
         "diagnoses_raw": raw_diagnosis_table(df, splits),
         "diagnosis_tokens": token_table(df, splits),
         "diagnosis_groups": group_table(df, splits),
+        "diagnosis_correspondence": correspondence_table(df, splits),
+        "diagnosis_groups_proposed": proposed_group_table(df, splits),
     }
     titles = {
         "databases": "Databases (native original scans, all participants)",
         "diagnoses_raw": "Raw diagnosis values before cleaning, with the groups assigned by the notebook rules",
         "diagnosis_tokens": "Tokens after splitting on , ; | and the rule applied to each",
         "diagnosis_groups": "Diagnosis groups after cleaning (a scan can belong to several groups)",
+        "diagnosis_correspondence": "Proposed classification: every term found, with its type, group and counts "
+                                    "(analysis/diagnosis_terms.csv)",
+        "diagnosis_groups_proposed": "Proposed groups, counted on whole scans (both diagnosis columns; a scan "
+                                     "can belong to several groups)",
     }
     md = ["# Inventory of databases and diagnoses", "",
           "Rows: native original scans read as in the Figure 13 forest plot (healthy + prediction files, "
@@ -194,6 +275,15 @@ def main(argv=None) -> int:
             print("   not mapped: " + "; ".join(f"{t} ({n:,})" for t, n in zip(unmapped["token"], unmapped["scans"])))
         if len(multi):
             print("   several rules: " + "; ".join(f"{t} -> {g}" for t, g in zip(multi["token"], multi["group"])))
+    corr = tables["diagnosis_correspondence"]
+    unm = corr[corr["type"] == "UNMAPPED"]
+    print(f"Proposed classification: {len(corr)} terms, {len(unm)} not in analysis/diagnosis_terms.csv"
+          + (": " + "; ".join(f"{t} ({n:,})" for t, n in zip(unm["term"], unm["scans"])) if len(unm) else ""))
+    prop = tables["diagnosis_groups_proposed"]
+    unc = prop[prop["group"] == dc.UNCLASSIFIED]
+    if len(unc):
+        print("Patients without any proposed group (Unclassified_patient): "
+              + ", ".join(f"{s} {int(unc[f'scans {s}'].iloc[0]):,} scans" for s in splits))
     for e in errors:
         print(f"ERROR: {e}")
     for w in warnings:
