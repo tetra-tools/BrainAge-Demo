@@ -682,6 +682,19 @@ def test_terms_table_and_unmapped_terms():
         {"AD": "Other_neuro_disease", "OCD": "Other_psych_disease"}
 
 
+def test_merge_and_single_label_helpers():
+    scans = [frozenset({"AD"}), frozenset({"AD", "OCD"}), frozenset(), frozenset(), frozenset({"FTD"})]
+    assert dc.group_counts(scans) == {"AD": 2, "OCD": 1, "FTD": 1}
+    mapping = dc.rare_groups({"AD": 40, "OCD": 1, "FTD": 2})
+    assert dc.merge_rare(scans[1], mapping) == {"AD", "Other_psych_disease"}
+    assert dc.merge_rare(scans[4], mapping) == {"Other_neuro_disease"}
+    labels = [dc.single_label(s, h) for s, h in zip(scans, [False, False, True, False, False])]
+    assert labels == ["AD", "Mixed", "CN", "Unclassified_patient", "FTD"]
+    flags = dc.group_flags(scans, ["AD", "OCD"])
+    assert flags.columns.tolist() == ["group_AD", "group_OCD"]
+    assert flags["group_AD"].tolist() == [True, True, False, False, False]
+
+
 def _tricky_diagnoses(split, source, df):
     """Patients get the classification cases above, in turn."""
     patients = df["healthy"] == 0
