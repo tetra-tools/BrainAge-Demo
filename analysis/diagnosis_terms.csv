@@ -7,11 +7,16 @@ Subjective Cognitive Complaint,GROUP,SCC,neurological,
 Impaired not MCI,GROUP,Impaired_not_MCI,neurological,
 Parkinson's Disease,GROUP,Parkinson,neurological,
 Parkinsons Disease,GROUP,Parkinson,neurological,
+Juvenile Autosomal Recessive Parkinsonism,GROUP,Parkinson,neurological,genetic Parkinson's disease (symptomatic)
 Prodromal Synucleinopathy,GROUP,Prodromal_PD,neurological,
+REM Sleep Behavior Disorder,GROUP,Prodromal_PD,neurological,prodromal synucleinopathy marker (PPMI prodromal cohort)
+Primary Autonomic Failure,GROUP,Prodromal_PD,neurological,prodromal synucleinopathy (PPMI prodromal cohort)
 LRRK2,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
 GBA,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
 PRKN,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
 SNCA,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
+PARK7,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
+PINK1,GROUP,Mutation_PD,neurological,carriers of a Parkinson's disease mutation
 Vascular Brain Injury,GROUP,Vascular,neurological,
 Vascular Dementia,GROUP,Vascular,neurological,
 Stroke,GROUP,Vascular,neurological,
@@ -20,9 +25,11 @@ PostStroke,GROUP,Vascular,neurological,
 Traumatic Brain Injury,GROUP,TBI,neurological,
 TBI,GROUP,TBI,neurological,
 FrontoTemporal Dementia,GROUP,FTD,neurological,
+Fronto-temporal Dementia,GROUP,FTD,neurological,spelling variant
 Progressive Supranuclear Palsy,GROUP,Atypical_parkinsonism,neurological,"atypical parkinsonian syndromes, grouped a priori"
 CorticoBasal Syndrome,GROUP,Atypical_parkinsonism,neurological,"atypical parkinsonian syndromes, grouped a priori"
 Dementia with Lewy Bodies,GROUP,Atypical_parkinsonism,neurological,"atypical parkinsonian syndromes, grouped a priori"
+Multiple System Atrophy,GROUP,Atypical_parkinsonism,neurological,"atypical parkinsonian syndromes, grouped a priori"
 Normal Pressure Hydrocephalus,GROUP,NPH,neurological,
 Essential Tremor,GROUP,Movement_disorder,neurological,movement disorder (disease)
 Dystonia,GROUP,Movement_disorder,neurological,movement disorder (disease)
@@ -34,6 +41,9 @@ Epilepsy,OTHER_DISEASE,Other_neuro_disease,neurological,
 Seizure Disorder,OTHER_DISEASE,Other_neuro_disease,neurological,
 CNS Neoplasm,OTHER_DISEASE,Other_neuro_disease,neurological,
 Peripheral Neuropathy,OTHER_DISEASE,Other_neuro_disease,neurological,
+Motor Neuron Disease,OTHER_DISEASE,Other_neuro_disease,neurological,
+Muscular Dystrophy,OTHER_DISEASE,Other_neuro_disease,neurological,
+Bell's Palsy,OTHER_DISEASE,Other_neuro_disease,neurological,
 Other Cognitive Disorder,OTHER_COGNITIVE,Other_neuro_disease,neurological,only when no other neurological disease is in the cell
 Dementia,DEMENTIA,Dementia_unspecified,neurological,takes the cause written in the cell (rule R6)
 Primary Progressive Aphasia,PPA,MCI,neurological,"MCI when no disease is in the cell; with FTD or AD, that disease"
@@ -45,6 +55,8 @@ Medical Illness-related,ATTRIBUTION,Other_neuro_disease,neurological,attributed 
 Medication-related,ATTRIBUTION,Other_neuro_disease,neurological,attributed cause: Other_neuro_disease only when nothing else is in the cell
 Alcohol-related,ATTRIBUTION,Other_neuro_disease,neurological,attributed cause: Other_neuro_disease only when nothing else is in the cell
 Substance-related,ATTRIBUTION,Other_neuro_disease,neurological,attributed cause: Other_neuro_disease only when nothing else is in the cell
+Toxic / Metabolic Disorder,ATTRIBUTION,Other_neuro_disease,neurological,attributed cause: Other_neuro_disease only when nothing else is in the cell
+Post-Surgical,ATTRIBUTION,Other_neuro_disease,neurological,attributed cause: Other_neuro_disease only when nothing else is in the cell
 Amnestic,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Non-Amnestic,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Single Domain,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
@@ -61,6 +73,7 @@ Other,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Behavioral,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Broca,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Wernicke,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
+TranscorticalMotor,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Conduction,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Anomic,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
 Global,DESCRIPTOR,,,"descriptor (subtype, domain, variant, certainty, form)"
@@ -75,6 +88,7 @@ Major Depressive Disorder,GROUP,Depression,psychiatric,depressive disorders
 Dysthymia,GROUP,Depression,psychiatric,depressive disorders
 Bipolar Disorder,GROUP,Bipolar,psychiatric,
 Anxiety Disorder,GROUP,Anxiety,psychiatric,
+Anxiety,GROUP,Anxiety,psychiatric,
 Generalized Anxiety Disorder,GROUP,Anxiety,psychiatric,
 Panic Disorder,GROUP,Anxiety,psychiatric,
 GAD,GROUP,Anxiety,psychiatric,
@@ -109,4 +123,6 @@ Treated,DESCRIPTOR,,,"descriptor (substance, pain type, feature, treatment)"
 Untreated,DESCRIPTOR,,,"descriptor (substance, pain type, feature, treatment)"
 Unknown,MISSING,,,no information
 Undetermined,MISSING,,,no information
+Undetermined etiology,MISSING,,,no information
+deferred,MISSING,,,no information
 NA,MISSING,,,no information

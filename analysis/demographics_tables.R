@@ -458,8 +458,10 @@ make_tables <- function(subjects, scans, out_dir) {
                  n_sessions ~ "Sessions per subject", n_samples ~ "Samples per subject (native + augmented)",
                  followup_all ~ "Follow-up duration, all subjects (years; single session = 0)",
                  followup_multi ~ "Follow-up duration, subjects with >= 2 sessions (years)")) %>%
-    relabel_missing("followup_multi", "Single session (no follow-up)") %>%
+    # add_overall() first: it recomputes the table without `by` and merges the rows on their labels,
+    # so a label changed before it ("Unknown" -> "Single session") makes the merge fail
     add_overall() %>%
+    relabel_missing("followup_multi", "Single session (no follow-up)") %>%
     as_gt() %>%
     gt::gtsave(filename = file.path(out_dir, "demographics_table_split.docx"))
 
