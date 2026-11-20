@@ -22,6 +22,9 @@ TABLE_FIELDS = ["subject_id", "input_path", "predicted_age", "chronological_age"
 
 # ---------------------------------------------------------------- helpers
 def _collect_inputs(args) -> Tuple[List[Path], List[Optional[float]], List[Optional[str]]]:
+    """Input paths, chronological ages (rounded down to whole years) and subject ids."""
+    from .pipeline import floor_age
+
     paths, ages, ids = [], [], []
     if args.list:
         delimiter = "," if str(args.list).lower().endswith(".csv") else "\t"
@@ -34,8 +37,10 @@ def _collect_inputs(args) -> Tuple[List[Path], List[Optional[float]], List[Optio
             for row in reader:
                 p = Path(row["path"])
                 paths.append(p if p.is_absolute() else base / p)
-                age = (row.get("age") or "").strip()
-                ages.append(float(age) if age else None)
+                try:
+                    ages.append(floor_age(row.get("age")))  # rounded down, as the training targets
+                except ValueError as e:
+                    raise ValueError(f"{args.list}, line {reader.line_num}: {e}") from None
                 ids.append((row.get("subject_id") or "").strip() or None)
     for item in args.inputs:
         p = Path(item)
@@ -55,7 +60,7 @@ def _collect_inputs(args) -> Tuple[List[Path], List[Optional[float]], List[Optio
     if args.age is not None:
         if len(paths) != 1:
             raise ValueError("--age can only be used with a single input (use --list for several)")
-        ages = [args.age]
+        ages = [floor_age(args.age)]
     return paths, ages, ids
 
 
@@ -150,8 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
                                "  brainage predict /data/bids --output results.tsv\n"
                                "  brainage predict --list subjects.tsv --output results.csv  # columns: path[,age][,subject_id]\n")
     pr.add_argument("inputs", nargs="*", help="NIfTI files (.nii/.nii.gz) or folders (searched recursively)")
-    pr.add_argument("--list", help="TSV/CSV with a 'path' column and optional 'age', 'subject_id'")
-    pr.add_argument("--age", type=float, help="chronological age (single input) to compute the brain-age gap")
+    pr.add_argument("--list", help="TSV/CSV with a 'path' column and optional 'age' (rounded down to whole "
+                                   "years), 'subject_id'")
+    pr.add_argument("--age", type=float,
+                    help="chronological age (single input) to compute the brain-age gap; rounded down to "
+                         "whole years, as the training targets (63.9 -> 63)")
     pr.add_argument("--bundle", help=bundle_help)
     pr.add_argument("-o", "--output", help="write results to .tsv, .csv or .json")
     pr.add_argument("--json", action="store_true", help="print full JSON results on stdout")
