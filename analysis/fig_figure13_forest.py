@@ -483,7 +483,7 @@ reference is the healthy participants. Each point is the coefficient of a group:
 predicted brain age from healthy participants of the same sex at the mean age, for scans without a
 co-occurring group of an interaction term. Bars, 95% confidence intervals from {se_txt}; filled points,
 p < 0.05 (uncorrected). n, scans of the group in the model; –, group not modelled in that split. (a, b)
-Neurological and (c, d) psychiatric groups. Groups follow the thesis classification; groups with fewer than
+Neurological and (c, d) psychiatric groups. Groups follow the diagnostic classification of the Methods; groups with fewer than
 {min_scans} scans in a split are merged into other neurological or psychiatric disease, and patients
 without a modelled group are not modelled.
 
@@ -496,7 +496,7 @@ without a modelled group are not modelled.
 
 Associations between diagnostic groups and predicted brain age were estimated by ordinary least squares in
 each split, with predicted brain age as the outcome and chronological age (floored, centred), sex, one
-indicator per diagnostic group (thesis classification; groups with fewer than {min_scans} scans merged into
+indicator per diagnostic group (diagnostic classification of the Methods; groups with fewer than {min_scans} scans merged into
 other neurological or psychiatric disease; healthy participants as reference), group × age interactions and
 interactions between groups co-occurring in at least {min_cooccurrence} scans as predictors; inference used
 {se_txt}.
