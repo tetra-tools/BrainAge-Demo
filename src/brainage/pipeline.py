@@ -17,12 +17,47 @@ from .preprocessing import Preprocessor, default_output_stem
 log = logging.getLogger(__name__)
 
 
+def floor_age(age) -> Optional[float]:
+    """Chronological age rounded down to whole years (63.9 -> 63.0).
+
+    Design rule: the model was trained on ages rounded down to whole years, so every
+    chronological age is rounded down before it is stored or used (brain-age gap included).
+    The predicted age is the model output and is not rounded.
+
+    A missing age (``None``, empty string, NaN as in pandas) gives ``None``: no brain-age gap.
+    Raises ``ValueError`` for a value that is not a number, infinite, or negative.
+    """
+    if age is None:
+        return None
+    if isinstance(age, str):
+        age = age.strip()
+        if not age:
+            return None
+    try:
+        value = float(age)
+    except (TypeError, ValueError):
+        raise ValueError(f"Chronological age must be a number, got {age!r}") from None
+    if math.isnan(value):
+        return None
+    if math.isinf(value) or value < 0:
+        raise ValueError(f"Chronological age must be a finite number >= 0, got {age!r}")
+    return float(math.floor(value))
+
+
+def _floor_age_or_none(age) -> Optional[float]:
+    """``floor_age`` for error rows: an invalid age is reported as missing, not raised again."""
+    try:
+        return floor_age(age)
+    except ValueError:
+        return None
+
+
 @dataclass
 class PredictionResult:
     input_path: str
     predicted_age: Optional[float] = None
-    chronological_age: Optional[float] = None
-    brain_age_gap: Optional[float] = None       # predicted - chronological
+    chronological_age: Optional[float] = None   # rounded down to whole years (floor_age)
+    brain_age_gap: Optional[float] = None       # predicted - chronological (rounded down)
     subject_id: Optional[str] = None
     status: str = "ok"                          # "ok" | "error"
     error: Optional[str] = None
@@ -60,9 +95,13 @@ class BrainAgePipeline:
                 output_stem: Optional[str] = None) -> PredictionResult:
         """Predict the brain age of one image. Raises on failure (see ``predict_many`` for batch-safe use).
 
+        ``chronological_age`` is rounded down to whole years (``floor_age``), as the training
+        targets; ``brain_age_gap`` is ``predicted_age`` minus that rounded-down age.
+
         ``output_stem`` names the QC files written to ``save_preprocessed_dir`` (default: subject_id,
         else the input file name).
         """
+        chronological_age = floor_age(chronological_age)  # checked before the slow preprocessing
         t_start = time.perf_counter()
         pre = self.preprocessor.run(image_path, skip_bias_correction=skip_bias_correction,
                                     skip_registration=skip_registration, save_dir=save_preprocessed_dir,
@@ -79,8 +118,8 @@ class BrainAgePipeline:
             steps=pre.steps + ["sfcn_onnx_inference"],
             timings={k: round(v, 3) for k, v in timings.items()}, saved_files=pre.saved_files)
         if chronological_age is not None:
-            res.chronological_age = float(chronological_age)
-            res.brain_age_gap = round(age - float(chronological_age), 3)
+            res.chronological_age = chronological_age
+            res.brain_age_gap = round(age - chronological_age, 3)
         log.info("%s -> %.2f years (%.1fs)", image_path, age, timings["total"])
         return res
 
@@ -104,7 +143,8 @@ class BrainAgePipeline:
                 if fail_fast:
                     raise
                 log.error("%s: %s", path, e)
-                results.append(PredictionResult(input_path=str(path), subject_id=sid, chronological_age=age,
+                results.append(PredictionResult(input_path=str(path), subject_id=sid,
+                                                chronological_age=_floor_age_or_none(age),
                                                 status="error", error=f"{type(e).__name__}: {e}",
                                                 model_name=self.bundle.name, model_version=self.bundle.version))
         return results

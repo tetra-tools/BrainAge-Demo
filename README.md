@@ -16,7 +16,7 @@ raw T1w .nii(.gz)
   └─ brain mask ........................... TorchIO  │ (generate_ptfiles.py),
   └─ crop/pad to 160×192×160 ............. TorchIO  ┘ without augmentation
   └─ SFCN ................................ ONNX Runtime
-→ predicted age (years) [+ brain-age gap if the chronological age is given]
+→ predicted age (years) [+ brain-age gap if the chronological age is given; rounded down to whole years]
 ```
 
 Contents:
@@ -102,8 +102,8 @@ from brainage import BrainAgePipeline
 
 pipe = BrainAgePipeline("models/brainage-sfcn-1.0.0", num_threads=8)   # load once
 
-res = pipe.predict("sub-01_T1w.nii.gz", chronological_age=63, subject_id="sub-01")
-print(res.predicted_age, res.brain_age_gap)      # e.g. 66.41  3.41
+res = pipe.predict("sub-01_T1w.nii.gz", chronological_age=63.9, subject_id="sub-01")
+print(res.chronological_age, res.predicted_age, res.brain_age_gap)   # e.g. 63.0  66.41  3.41
 print(res.timings)                               # seconds per step
 res.to_dict()                                    # JSON-serialisable
 
@@ -119,6 +119,12 @@ tensor = pipe.preprocessor.run("sub-01_T1w.nii.gz").tensor   # (1, 1, 160, 192, 
 age = pipe.predictor.predict(tensor)                           # np.array([66.41])
 ```
 
+**Chronological age is always rounded down to whole years** (63.9 → 63), in the API, `--age`
+and `--list`: the model was trained on ages rounded down, so the brain-age gap is the predicted
+age minus the rounded-down age. The predicted age is the model output and is not rounded.
+`chronological_age` in the results is the rounded-down value. A missing age (empty, `None`,
+NaN) gives no gap; an age that is not a number, infinite or negative is rejected.
+
 ## 4. CLI reference
 
 ```
@@ -133,8 +139,8 @@ brainage archive BUNDLE_DIR [-o FILE]
 | Option | Meaning |
 |---|---|
 | `INPUTS` | `.nii`/`.nii.gz` files and/or folders (searched recursively) |
-| `--list` | TSV/CSV with a `path` column, optional `age` and `subject_id` (relative paths are relative to the list) |
-| `--age` | chronological age for a single input → `brain_age_gap = predicted − chronological` |
+| `--list` | TSV/CSV with a `path` column, optional `age` (rounded down to whole years) and `subject_id` (relative paths are relative to the list) |
+| `--age` | chronological age for a single input, rounded down to whole years → `brain_age_gap = predicted − rounded-down age` |
 | `--bundle` | bundle folder; default `$BRAINAGE_BUNDLE`, then `/opt/brainage/model` |
 | `-o/--output` | `.tsv`, `.csv` (one row per image) or `.json` (full details incl. timings) |
 | `--save-preprocessed` | writes `<stem>_space-template_desc-biascorr_T1w.nii.gz` (after N4 + registration) and `<stem>_desc-modelinput_T1w.nii.gz` (exact network input) for QC. `<stem>` = `subject_id`, else the file name without `_T1w`; inputs with the same name in one batch are prefixed with their parent folder, so nothing is overwritten |
@@ -145,7 +151,8 @@ brainage archive BUNDLE_DIR [-o FILE]
 | `--fail-fast` | stop at the first error instead of reporting it and continuing |
 
 Output columns (`.tsv/.csv`): `subject_id, input_path, predicted_age, chronological_age,
-brain_age_gap, status, error, model_name, model_version, total_seconds`.
+brain_age_gap, status, error, model_name, model_version, total_seconds`. `chronological_age` is
+the rounded-down age used for `brain_age_gap`.
 
 Exit codes: `0` all images OK, `1` at least one image failed, `2` configuration error
 (bundle missing/corrupted, bad arguments).

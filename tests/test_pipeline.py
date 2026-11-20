@@ -1,6 +1,7 @@
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import nibabel as nib
 import numpy as np
@@ -101,7 +102,7 @@ def test_full_pipeline_on_raw_scan(assets, bundle_dir, tmp_path):
 def test_cli_batch_with_list_and_error_isolation(assets, bundle_dir, tmp_path):
     lst = tmp_path / "subjects.tsv"
     lst.write_text("subject_id\tpath\tage\n"
-                   f"sub-01\t{assets['in_space']}\t55\n"
+                   f"sub-01\t{assets['in_space']}\t55.7\n"
                    f"sub-missing\t{tmp_path / 'nope.nii.gz'}\t\n")
     out = tmp_path / "results.json"
     code = cli(["predict", "--list", str(lst), "--bundle", str(bundle_dir), "--cpu",
@@ -109,13 +110,17 @@ def test_cli_batch_with_list_and_error_isolation(assets, bundle_dir, tmp_path):
     assert code == 1  # one image failed
     res = json.loads(out.read_text())
     assert [r["status"] for r in res] == ["ok", "error"]
-    assert res[0]["subject_id"] == "sub-01" and res[0]["chronological_age"] == 55
+    assert res[0]["subject_id"] == "sub-01" and res[0]["chronological_age"] == 55  # 55.7 rounded down
+    assert res[0]["brain_age_gap"] == pytest.approx(res[0]["predicted_age"] - 55, abs=1e-3)
 
     tsv = tmp_path / "results.tsv"
     assert cli(["predict", str(assets["in_space"]), "--bundle", str(bundle_dir), "--cpu",
-                "--skip-registration", "--skip-bias-correction", "--age", "40", "-o", str(tsv)]) == 0
+                "--skip-registration", "--skip-bias-correction", "--age", "40.9", "-o", str(tsv)]) == 0
     header, row = tsv.read_text().strip().split("\n")
     assert header.split("\t")[:3] == ["subject_id", "input_path", "predicted_age"]
+    values = dict(zip(header.split("\t"), row.split("\t")))
+    assert float(values["chronological_age"]) == 40  # 40.9 rounded down
+    assert float(values["brain_age_gap"]) == pytest.approx(float(values["predicted_age"]) - 40, abs=1e-3)
 
 
 # ------------------------------------------------------------ review fixes
@@ -165,6 +170,72 @@ def test_batch_qc_outputs_do_not_collide(assets, bundle_dir, tmp_path):
                             save_preprocessed_dir=tmp_path / "qc", fail_fast=True)
     files = [f for r in res for f in r.saved_files.values()]
     assert len(set(files)) == 4 and all(Path(f).is_file() for f in files)
+
+
+# ------------------------------------------- chronological age rounded down
+def test_floor_age():
+    from brainage.pipeline import floor_age
+
+    assert floor_age(63.9) == 63.0 and floor_age("63.9") == 63.0 and floor_age(" 70 ") == 70.0
+    assert floor_age(63) == 63.0 and floor_age(0.4) == 0.0 and floor_age(np.float32(45.99)) == 45.0
+    for missing in (None, "", "  ", float("nan"), np.nan):
+        assert floor_age(missing) is None
+    for bad in ("abc", "inf", float("-inf"), -1, "-0.5"):
+        with pytest.raises(ValueError, match="Chronological age"):
+            floor_age(bad)
+
+
+class _FakePreprocessor:
+    def run(self, image_path, **kwargs):
+        if "unreadable" in str(image_path):
+            raise RuntimeError("cannot read image")
+        return SimpleNamespace(tensor=np.zeros((1, 1, 2, 2, 2), np.float32), timings={}, steps=[],
+                               saved_files={})
+
+
+class _FakePredictor:
+    def predict(self, x):
+        return np.array([66.4], dtype=np.float32)
+
+
+def _fake_pipeline():
+    """BrainAgePipeline without a bundle: only the age handling is under test."""
+    pipe = BrainAgePipeline.__new__(BrainAgePipeline)
+    pipe.bundle = SimpleNamespace(name="fake", version="0")
+    pipe.preprocessor, pipe.predictor = _FakePreprocessor(), _FakePredictor()
+    return pipe
+
+
+def test_api_rounds_chronological_age_down():
+    pipe = _fake_pipeline()
+    res = pipe.predict("sub-01_T1w.nii.gz", chronological_age=63.9)
+    assert res.chronological_age == 63.0
+    assert res.predicted_age == pytest.approx(66.4)  # the prediction itself is not rounded
+    assert res.brain_age_gap == pytest.approx(66.4 - 63, abs=1e-3)
+
+    many = pipe.predict_many(["a.nii.gz", "unreadable.nii.gz", "c.nii.gz", "d.nii.gz", "e.nii.gz"],
+                             chronological_ages=[45.99, 70.5, None, float("nan"), -2])
+    assert [r.status for r in many] == ["ok", "error", "ok", "ok", "error"]
+    assert [r.chronological_age for r in many] == [45.0, 70.0, None, None, None]
+    assert many[0].brain_age_gap == pytest.approx(66.4 - 45, abs=1e-3)
+    assert many[2].brain_age_gap is None and many[3].brain_age_gap is None
+    assert "Chronological age" in many[4].error
+
+
+def test_cli_rounds_chronological_age_down(tmp_path):
+    from brainage.cli import _collect_inputs
+
+    lst = tmp_path / "subjects.csv"
+    lst.write_text("path,age,subject_id\na.nii.gz,63.9,sub-01\nb.nii.gz,,sub-02\nc.nii.gz,70,sub-03\n")
+    _, ages, ids = _collect_inputs(SimpleNamespace(list=str(lst), inputs=[], age=None))
+    assert ages == [63.0, None, 70.0] and ids == ["sub-01", "sub-02", "sub-03"]
+
+    _, ages, _ = _collect_inputs(SimpleNamespace(list=None, inputs=[str(tmp_path / "x.nii.gz")], age=40.9))
+    assert ages == [40.0]
+
+    lst.write_text("path,age\na.nii.gz,63\nb.nii.gz,-3\n")
+    with pytest.raises(ValueError, match="line 3"):
+        _collect_inputs(SimpleNamespace(list=str(lst), inputs=[], age=None))
 
 
 def test_registration_command_matches_conversion_script():
