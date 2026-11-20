@@ -15,3 +15,5 @@ model/
 *.nii
 *.nii.gz
 results/
+# participant-level prediction tables used by analysis/ are never committed
+data/
