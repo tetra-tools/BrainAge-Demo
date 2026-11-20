@@ -23,6 +23,7 @@ import argparse
 import sys
 from typing import List
 
+import numpy as np
 import pandas as pd
 
 import analysis_io as aio
@@ -53,7 +54,7 @@ def database_table(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (split, db), f in df.groupby(["_split", aio.COL_DATABASE], sort=True, dropna=False):   # missing labels kept
         healthy = f[aio.COL_HEALTHY] == 1
-        age = pd.to_numeric(f[aio.COL_AGE], errors="coerce")
+        age = np.floor(pd.to_numeric(f[aio.COL_AGE], errors="coerce"))  # floored, as in every analysis
         rows.append({"split": split, "database": MISSING if pd.isna(db) else db, "scans": len(f),
                      "participants": f["_subject"].nunique(),
                      "healthy scans (healthy == 1)": int(healthy.sum()),

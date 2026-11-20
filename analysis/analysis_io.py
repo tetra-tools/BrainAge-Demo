@@ -162,6 +162,21 @@ def native_scans(raw: pd.DataFrame, notes: List[str]) -> pd.DataFrame:
     return pd.concat(out)
 
 
+def drop_cross_file_copies(df: pd.DataFrame, keep=(COL_AUG, COL_ORIGINAL)) -> pd.DataFrame:
+    """Remove rows of the prediction file that also appear in the healthy file of the same split.
+
+    Rows are compared on every column except the per-file ones (``DROP_COLS``), but keeping the
+    augmentation columns so that different augmented samples stay distinct. Unlike
+    ``drop_duplicates()``, repeated rows within one file are kept: two flipped copies of the same
+    scan are identical (same augmentation text, same image, same prediction) and are two samples.
+    Used for analyses of augmented rows; native scans follow the forest-plot rule (native_scans).
+    """
+    cols = [c for c in df.columns if not c.startswith("_") and (c not in DROP_COLS or c in keep)]
+    key = pd.util.hash_pandas_object(df[cols].assign(_split=df["_split"]), index=False)
+    in_healthy = key.isin(set(key[df["_source"] == "healthy_file"]))
+    return df[~((df["_source"] == "prediction_file") & in_healthy)]
+
+
 def _examples(values, n: int = 8) -> str:
     values = list(values)
     shown = ", ".join(repr(v) for v in values[:n])

@@ -199,7 +199,10 @@ def make_figure(d: pd.DataFrame, part: pd.DataFrame, curves: pd.DataFrame, out_d
             .merge(plotted[["participant", "group"]], left_on="_subject", right_on="participant")
             .sort_values(["_subject", "_t", "_ses_num"], kind="stable"))          # each line in time order
     t_max = max(1.0, float(traj["_t"].max())) if len(traj) else 1.0
-    y = np.concatenate([traj["_dpred"].to_numpy(float), [0.0, t_max]])
+    drawn = curves[curves["drawn (n >= min-n)"] & curves["group"].isin(GROUPS)]
+    y = np.concatenate([traj["_dpred"].to_numpy(float), [0.0, t_max],      # mean-curve CIs stay inside panels a-c
+                        drawn[["ci95_low", "ci95_high"]].to_numpy(float).ravel()])
+    y = y[np.isfinite(y)]
     y_lo, y_hi = np.floor(y.min() / 5) * 5, np.ceil(y.max() / 5) * 5
 
     cm = 1 / 2.54

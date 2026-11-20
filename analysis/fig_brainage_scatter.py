@@ -95,12 +95,9 @@ def load_population(pred_dir: Path, model_tag: str, train_file, notes: List[str]
     pop["_scan"] = aio.scan_key(pop)
 
     # All rows (native + augmented) of healthy participants, for the MAE by augmentation.
-    # Duplicates across the two files are removed with the forest-plot rule (per-file columns
-    # ignored), keeping the augmentation columns so different augmentations stay distinct.
-    allrows = raw[raw[aio.COL_HEALTHY] == 1]
-    cols = [c for c in allrows.columns if not c.startswith("_")
-            and (c not in aio.DROP_COLS or c in (aio.COL_AUG, aio.COL_ORIGINAL))]
-    allrows = allrows.drop_duplicates(subset=["_split", *cols], keep="first").copy()
+    # Rows of the prediction file that are copies of healthy-file rows are counted once; repeated
+    # rows within a file (e.g. two identical flipped copies of a scan) are all kept.
+    allrows = aio.drop_cross_file_copies(raw[raw[aio.COL_HEALTHY] == 1]).copy()
     for col in (aio.COL_PRED, aio.COL_AGE):
         allrows[col] = pd.to_numeric(allrows[col], errors="coerce")
     allrows = allrows.dropna(subset=[aio.COL_PRED, aio.COL_AGE])

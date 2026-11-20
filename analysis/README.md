@@ -14,6 +14,10 @@ Docker image.
 Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does) and
 `diagnosis_groups.py` (diagnosis cleaning and grouping rules copied from the forest-plot notebook).
 
+Age: every script uses chronological age floored to whole years (design: the model is trained on
+floored ages). The prediction TSVs already hold whole years; the scripts floor again so that a
+table with decimal ages gives the same results.
+
 ## Install
 
 ```bash

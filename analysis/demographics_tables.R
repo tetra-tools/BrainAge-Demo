@@ -171,6 +171,7 @@ prepare <- function(raw) {
     if (length(bad)) problems <- c(problems, sprintf("'%s': %d values are not numbers: %s", col, length(bad), show(bad)))
     raw[[col]] <- v
   }
+  raw$age <- floor(raw$age)  # chronological age floored to whole years in every analysis (design)
   raw$is_original_flag <- as_flag(raw$is_original)
   raw$healthy_num <- suppressWarnings(as.numeric(raw$healthy))
 
@@ -191,14 +192,21 @@ prepare <- function(raw) {
                                                       sum(bad_split), paste(names(SPLIT_LABELS), collapse = "/"),
                                                       show(paste(raw$split[bad_split], raw$datasetfile[bad_split]))))
 
+  # Rows of a prediction-<split> file that are copies of rows of the <split> (healthy) file are
+  # counted once. Repeated rows within one file are kept: two flipped copies of the same scan are
+  # identical (same augmentation text, same image, same prediction) but are two samples.
+  row_key <- do.call(paste, c(raw[c("split", setdiff(names(raw), FILE_COLUMNS))], sep = "\x1f"))
+  from_prediction_file <- startsWith(raw$datasetfile, "prediction-")
+  copy_of_healthy_row <- from_prediction_file & row_key %in% row_key[!from_prediction_file]
   raw <- raw %>% mutate(scan_key = paste(split, database, subject_id, session_id, sep = "/"))
-  # rows present in both files (healthy rows copied in the prediction file) are counted once
-  rows <- raw[!duplicated(raw[c("split", setdiff(names(raw), FILE_COLUMNS))]), ]
+  rows <- raw[!copy_of_healthy_row, ]
   native <- rows %>% filter(augmentation == "native", is_original_flag %in% TRUE)
   lost <- setdiff(unique(raw$scan_key), unique(native$scan_key))
   if (length(lost)) problems <- c(problems, sprintf("%d scans have no native original row and would be dropped: %s",
                                                     length(lost), show(lost)))
 
+  # forest-plot rule for native scans: identical native rows (within or across files) count once
+  native <- native[!duplicated(native[c("split", setdiff(names(native), c(FILE_COLUMNS, "scan_key")))]), ]
   conflict <- native %>% group_by(scan_key) %>%
     summarise(n = n(), n_values = n_distinct(age, healthy_num, sex), .groups = "drop") %>% filter(n_values > 1)
   if (nrow(conflict)) problems <- c(problems, sprintf("%d scans have native rows with different age/healthy/sex: %s",
@@ -271,8 +279,11 @@ prepare <- function(raw) {
 }
 
 subject_level <- function(scans) {
+  # sessions in age order; sessions in the same (floored) year ordered by the number in session_id
+  # ("ses-2" before "ses-10"), as in fig_brainage_followup.py
   scans %>%
-    arrange(age, session_id) %>%
+    mutate(ses_num = suppressWarnings(as.numeric(str_extract(session_id, "[0-9]+")))) %>%
+    arrange(age, ses_num, session_id) %>%
     group_by(split, database, subject_id) %>%
     summarise(
       n_sessions = n_distinct(session_id),
@@ -324,8 +335,11 @@ make_tables <- function(subjects, scans, out_dir) {
       age, sex = factor(sex, levels = c("Female", "Male", "Unknown")),
       apoe = factor(apoe, levels = c("Non-carrier", "Carrier", "Unknown")),
       n_sessions, n_samples, followup_all, followup_multi)
+  # ages and follow-up are whole years (floored): without `type`, gtsummary would show variables with
+  # fewer than 10 distinct values as categories instead of mean (SD)
   tbl_summary(
     subj, by = split, missing = "ifany", statistic = stat, digits = all_continuous() ~ 2,
+    type = list(c(age, n_sessions, n_samples, followup_all, followup_multi) ~ "continuous"),
     include = c(healthy, age, sex, apoe, n_sessions, n_samples, followup_all, followup_multi),
     label = list(healthy ~ "Status at baseline", age ~ "Age at baseline (years)", sex ~ "Sex", apoe ~ "APOE",
                  n_sessions ~ "Sessions per subject", n_samples ~ "Samples per subject (native + augmented)",
@@ -345,6 +359,7 @@ make_tables <- function(subjects, scans, out_dir) {
     rename_with(~ str_replace(.x, "^aug_", "Augmented samples with "), starts_with("aug_"))
   tbl_summary(
     sc, by = split, missing = "ifany", statistic = stat, digits = all_continuous() ~ 2,
+    type = list(age ~ "continuous", starts_with("Augmented samples") ~ "continuous"),
     include = c(healthy, age, starts_with("Diagnosis: "), starts_with("Augmented samples")),
     label = list(healthy ~ "Status", age ~ "Age at session (years)")) %>%
     add_overall() %>%
@@ -410,7 +425,7 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   write_tsv(per_split, file.path(out_dir, "split_counts.tsv"))
   checks <- c(
     sprintf("Model tag: %s", opts$model_tag),
-    sprintf("Rows read: %d; distinct rows (identical rows of both files counted once): %d", prep$rows_read, prep$rows_distinct),
+    sprintf("Rows read: %d; after removing prediction-file copies of healthy-file rows: %d", prep$rows_read, prep$rows_distinct),
     capture.output(print(as.data.frame(per_split))),
     "", "Every raw sex value (native scans) and how it was coded:",
     capture.output(print(as.data.frame(count(scans, split, sex_raw, sex_filled, sex)), row.names = FALSE)),
