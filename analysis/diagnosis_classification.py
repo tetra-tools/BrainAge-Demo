@@ -22,14 +22,20 @@ in the neurological column counts in the psychiatric domain. Cells are split on 
 the notebook. Terms absent from the table are reported as unmapped and set no group.
 
 Groups of fewer than 30 scans in a split are merged into Other_neuro_disease / Other_psych_disease
-for models (R10); ``rare_groups`` lists them. Counts here are never merged.
+for models (R10); ``rare_groups`` lists them and ``merge_rare`` applies the merge. Counts here are
+never merged. The reference category is the healthy scans (healthy == 1, R11); patients without any
+group are Unclassified_patient. ``single_label`` gives one label per scan for analyses that need one
+(a scan in two groups or more is Mixed).
+
+A verbatim copy of this file and of diagnosis_terms.csv is in the training repository
+(RS-JYC-HK-T1wMNIBrainAgeRegression, camera_ready/common/) for the autoencoder analyses: edit both.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -43,6 +49,8 @@ EXPLAINS_PARKINSONISM = {"Parkinson", "Mutation_PD", "Prodromal_PD", "Atypical_p
 OTHER_DISEASE = {NEURO: "Other_neuro_disease", PSYCH: "Other_psych_disease"}
 ALWAYS_KEPT = {"Other_neuro_disease", "Other_psych_disease", "Other_neuro_symptom", "Other_psych_symptom"}
 UNCLASSIFIED = "Unclassified_patient"
+REFERENCE = "CN"        # healthy == 1 scans without any group: the reference category (R11)
+MIXED = "Mixed"         # single-label analyses only: a scan in two groups or more
 # when a term of each type sets its group (the column "condition" of the correspondence table)
 TYPE_CONDITION = {
     "CN": "no group (cognitively normal / healthy)",
@@ -156,3 +164,35 @@ def rare_groups(counts: Dict[str, int], min_scans: int = MIN_SCANS) -> Dict[str,
     are merged into for models (R10). Other_* groups are always kept."""
     return {g: OTHER_DISEASE[group_domain(g)] for g, n in counts.items()
             if 0 < n < min_scans and g not in ALWAYS_KEPT and group_domain(g) in OTHER_DISEASE}
+
+
+def group_counts(groups: Iterable[FrozenSet[str]]) -> Dict[str, int]:
+    """Scans per group, from the group sets of the scans (a scan counts once in each of its groups)."""
+    counts: Dict[str, int] = {}
+    for scan in groups:
+        for g in scan:
+            counts[g] = counts.get(g, 0) + 1
+    return counts
+
+
+def merge_rare(groups: FrozenSet[str], mapping: Dict[str, str]) -> FrozenSet[str]:
+    """Groups of one scan after the R10 merge (``mapping`` as returned by ``rare_groups``)."""
+    return frozenset(mapping.get(g, g) for g in groups)
+
+
+def single_label(groups: FrozenSet[str], healthy: bool) -> str:
+    """One label per scan: its group, Mixed if it has several, CN for a healthy scan without group,
+    Unclassified_patient for a patient without group."""
+    if len(groups) == 1:
+        return next(iter(groups))
+    if groups:
+        return MIXED
+    return REFERENCE if healthy else UNCLASSIFIED
+
+
+def group_flags(groups: Iterable[FrozenSet[str]], names: Optional[List[str]] = None) -> pd.DataFrame:
+    """One boolean column ``group_<name>`` per group (every group of the table by default), for
+    multi-label analyses where each group is compared with the rest."""
+    groups = list(groups)
+    names = all_groups() if names is None else list(names)
+    return pd.DataFrame({f"group_{g}": [g in scan for scan in groups] for g in names})

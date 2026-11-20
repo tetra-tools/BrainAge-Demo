@@ -37,7 +37,18 @@ A term counts in the domain of its meaning, whatever the column it is written in
 the neurological column counts as `Depression`). A scan's groups are those of both columns.
 Patients (`healthy == 0`) left without any group are `Unclassified_patient`. Groups with fewer
 than 30 scans in a split are marked as merged into `Other_neuro_disease` / `Other_psych_disease`
-(for models); counts are never merged. Figure 13 still uses the notebook rules.
+(for models); counts are never merged. Figure 13 still uses the notebook rules: to switch the
+forest-plot notebook to this classification, replace its grouping cell by the helpers below.
+
+Helpers for models (same module): `scan_groups(neuro, psych)` gives a scan's groups;
+`group_counts` and `rare_groups` give the R10 merge of a split, `merge_rare` applies it;
+`group_flags` gives one boolean column `group_<name>` per group (multi-label models, each
+group against the reference); `single_label` gives one label per scan (`CN` for healthy scans,
+the group, `Mixed` for several groups, `Unclassified_patient`). For the brain-age models, the
+reference is the healthy scans only (R11), not every scan without a group.
+
+The autoencoder analyses (training repository, `camera_ready/common/`) use verbatim copies of
+`diagnosis_classification.py` and `diagnosis_terms.csv`: edit both repositories together.
 
 Age: every script uses chronological age floored to whole years (design: the model is trained on
 floored ages). The prediction TSVs already hold whole years; the scripts floor again so that a
