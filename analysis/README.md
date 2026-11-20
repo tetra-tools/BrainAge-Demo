@@ -9,7 +9,8 @@ Docker image.
 | `fig_brainage_scatter.py` | predicted vs chronological age figure (healthy, native scans), statistics with bootstrap CIs, MAE by age band / sex / augmentation, thesis text |
 | `inventory_databases_diagnoses.py` | tables of all databases and of all raw neurological / psychiatric diagnoses before cleaning, with their grouping; correspondence table of the proposed classification with counts |
 | `fig_brainage_followup.py` | longitudinal course of predicted age (external validation, participants with ≥ 2 sessions): stable healthy, converters, patients |
-| `demographics_tables.R` | demographics tables by split (subject level and scan level with the proposed diagnosis groups, `.docx`), group and Figure 13 flag counts |
+| `fig_figure13_forest.py` | Figure 13: forest plot of the diagnostic groups (thesis classification) against predicted age, per split, with the model R² |
+| `demographics_tables.R` | demographics tables by split (subject level and scan level with the proposed diagnosis groups, `.docx`), group counts and counts of the old notebook flags |
 
 Shared code: `analysis_io.py` (reading the TSVs as the Figure 13 forest plot does),
 `diagnosis_groups.py` (diagnosis cleaning and grouping rules copied from the forest-plot notebook)
@@ -37,8 +38,9 @@ A term counts in the domain of its meaning, whatever the column it is written in
 the neurological column counts as `Depression`). A scan's groups are those of both columns.
 Patients (`healthy == 0`) left without any group are `Unclassified_patient`. Groups with fewer
 than 30 scans in a split are marked as merged into `Other_neuro_disease` / `Other_psych_disease`
-(for models); counts are never merged. Figure 13 still uses the notebook rules: to switch the
-forest-plot notebook to this classification, replace its grouping cell by the helpers below.
+(for models); counts are never merged. Figure 13 (`fig_figure13_forest.py`) uses this
+classification; the notebook rules are kept in `diagnosis_groups.py` for the inventory and the
+cross-check counts.
 
 Helpers for models (same module): `scan_groups(neuro, psych)` gives a scan's groups;
 `group_counts` and `rare_groups` give the R10 merge of a split, `merge_rare` applies it;
@@ -87,10 +89,11 @@ relative to the current directory.
 ```bash
 python analysis/fig_brainage_scatter.py               # -> results/analysis/
 python analysis/inventory_databases_diagnoses.py      # -> results/analysis/inventory/
+python analysis/fig_figure13_forest.py               # -> results/analysis/figure13/
 python analysis/fig_brainage_scatter.py --pred-dir path/to/tsv --out-dir path/to/out --n-boot 1000 --seed 2026
 ```
 
-Both scripts are executable (`./analysis/fig_brainage_scatter.py --help`). Exit code `0` on
+The scripts are executable (`./analysis/fig_brainage_scatter.py --help`). Exit code `0` on
 success, `2` if an input file or column is missing.
 
 ### `fig_brainage_scatter.py`
@@ -125,6 +128,47 @@ condition, the notebook rule, scans and participants per split), `diagnosis_grou
 (scans per proposed group, both columns together, with the Other group a split merges it into and
 `Unclassified_patient`), and `inventory.md` with all tables.
 
+### `fig_figure13_forest.py`
+
+```bash
+python analysis/fig_figure13_forest.py             # -> results/analysis/figure13/
+```
+
+Script version of the Figure 13 notebook (`multilabel_diagnostic_classification_v2`), reduced to
+the figure and moved to the thesis classification. Same reading rule (native original scans,
+healthy and prediction files concatenated and de-duplicated). In each split, an ordinary least
+squares model:
+
+`predicted age ~ age_c + sex_male + groups + group × age_c + group × group`
+
+* `age_c`: chronological age floored to whole years, centred on the mean of the split's model
+  sample (each group coefficient is the difference from the reference at that age; the notebook
+  used uncentred age, i.e. differences at age 0).
+* `sex_male`: 1 male, 0 female; a missing sex takes the agreeing sex of the participant's other
+  scans (as `demographics_tables.R`); scans still without sex are not modelled.
+* Groups: `scan_groups` of `diagnosis_classification.py`; R10 merge (< 30 scans in the split,
+  counted on all its native scans, as the tables); a group is modelled with at least 30 scans in
+  the model sample (`--min-scans`); a scan can be in several groups.
+* Group × group: pairs of modelled groups present together in at least 10 scans
+  (`--min-cooccurrence`), as the notebook.
+* Reference: healthy scans (R11). Patients without a modelled group (`Unclassified_patient`, or
+  only groups that are not modelled) are counted in `checks.md` and not modelled (the notebook
+  kept them in the reference).
+* A term that is a linear combination of the terms before it (two groups with the same scans, or
+  a pair interaction equal to a group because one group is nested in the other) is left out and
+  reported (`figure13_models.csv`, `checks.md`).
+* Standard errors: HC3 (heteroskedasticity-consistent; the notebook comment said HC3 but the
+  code used classical SEs); `--se cluster` clusters by participant (repeated sessions). 95% CIs
+  normal; filled points p < 0.05 uncorrected; Benjamini-Hochberg q-values in the tables.
+
+Outputs: `fig13_forest.pdf/.png` (16 cm wide, no title, PNG 300 dpi; (a, b) neurological, (c, d)
+psychiatric groups; test left, external validation right; order of the test coefficients, as the
+notebook), `figure13_main_effects.csv/.md`, `figure13_all_terms.csv`, `figure13_models.csv/.md`
+(N, centring age, R², adjusted R², R² of age + sex alone, formula), `figure13_groups.csv`
+(scans, R10 merge and modelling of each group), `figure13_legend.md` (legend and methods
+sentence), `checks.md` (every native scan accounted for). It stops on the same labelling problems
+as the other scripts and on a healthy scan with a diagnosis group (`--no-strict` to only report).
+
 ### `fig_brainage_followup.py`
 
 ```bash
@@ -149,7 +193,7 @@ Rscript analysis/demographics_tables.R            # -> results/analysis/demograp
 
 Reads all prediction tables of one model (`--model-tag`), every column as text, keeps one row
 per scan (native original scan; rows present in both files counted once) and applies the
-Figure 13 diagnosis rules (tokens split on `, ; |`). Subject level: baseline status, age, sex,
+old Figure 13 notebook rules (tokens split on `, ; |`). Subject level: baseline status, age, sex,
 APOE, sessions, samples (native + augmented, rows present in both files counted once) and
 follow-up duration in two rows (all subjects with single session = 0; subjects with at least
 two sessions only). Sex: female/male in any case; a missing value is filled from the same
@@ -158,8 +202,8 @@ participant's other scans when they agree. APOE: 0 = non-carrier, > 0 = carrier;
 per group present; a scan can be in several), augmented samples per transform.
 `diagnosis_group_counts.tsv` gives scans, participants and healthy scans per proposed group and
 split, and the Other group a split merges it into (< 30 scans). `diagnosis_flag_counts.tsv`
-counts the notebook flags as Figure 13 (`n_positive`: all native scans of the split), with the
-number of healthy scans among them, to cross-check the Figure 13 labels. `--terms` reads another
+counts the flags of the old Figure 13 notebook (`n_positive`: all native scans of the split), with
+the number of healthy scans among them, to compare with the earlier version of the figure. `--terms` reads another
 correspondence table. `split_counts.tsv` gives
 scans, participants and CN participants (healthy == 1) per split; `demographics_checks.txt`
 repeats them and lists every raw sex and APOE value with its coded category.
