@@ -662,6 +662,17 @@ CLASSIFICATION_CASES = [
     ("Cognitively Normal", "Major Depressive Disorder, Treated", {"Depression"}),
     ("Cognitively Normal", "Other Psychiatric Disorder", {"Other_psych_disease"}),
     ("LRRK2; GBA", "Unknown", {"Mutation_PD"}),                                         # R1
+    ("PARK7; PINK1", None, {"Mutation_PD"}),
+    ("Juvenile Autosomal Recessive Parkinsonism", None, {"Parkinson"}),                 # one term, not R8
+    ("REM Sleep Behavior Disorder, Hyposmia", None, {"Prodromal_PD"}),                  # R5: symptom dropped
+    ("Primary Autonomic Failure", None, {"Prodromal_PD"}),
+    ("Multiple System Atrophy, Parkinsonism", None, {"Atypical_parkinsonism"}),         # R8, R9
+    ("Fronto-temporal Dementia", None, {"FTD"}),
+    ("Dementia, Toxic / Metabolic Disorder", None, {"Other_neuro_disease"}),            # R6, attribution
+    ("Dementia, Undetermined etiology", None, {"Dementia_unspecified"}),                # R6, no cause
+    ("Aphasia, TranscorticalMotor, Post-Surgical", None, {"Other_neuro_disease"}),      # R4, R5
+    ("Motor Neuron Disease", "anxiety", {"Other_neuro_disease", "Anxiety"}),
+    ("Bell's Palsy; Muscular Dystrophy", "deferred", {"Other_neuro_disease"}),
     ("Unknown", "Undetermined", set()),
     (None, None, set()),
 ]
