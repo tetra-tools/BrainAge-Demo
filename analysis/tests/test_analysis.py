@@ -625,3 +625,120 @@ def test_scatter_and_followup_floor_decimal_ages(tmp_path):
     part = pd.read_csv(tmp_path / "fu" / "brainage_followup_participants.csv")
     for col in ("baseline age", "last age", "follow-up (years)"):
         assert (part[col] == np.floor(part[col])).all(), col
+
+
+# ---------------------------------------------------------------- proposed diagnosis classification
+
+import diagnosis_classification as dc  # noqa: E402
+
+CLASSIFICATION_CASES = [
+    # (neurological cell, psychiatric cell, expected groups)
+    ("Cognitively Normal", "Healthy", set()),
+    ("Alzheimer's Disease", None, {"AD"}),
+    ("Dementia", None, {"Dementia_unspecified"}),                                     # R6, no cause
+    ("Dementia, Amnestic, Multiple Domain, Traumatic Brain Injury", None, {"TBI"}),     # R6, cause written
+    ("Dementia, Other Cognitive Disorder", None, {"Other_neuro_disease"}),              # R6, other cause
+    ("Medical Illness-related, Amnestic, Multiple Domain, Dementia", None, {"Other_neuro_disease"}),
+    ("Medical Illness-related, Undetermined", None, {"Other_neuro_disease"}),          # R4, alone
+    ("MCI, Amnestic, Alcohol-related", None, {"MCI"}),                                  # R4, descriptor
+    ("Other Cognitive Disorder", None, {"Other_neuro_disease"}),
+    ("Post-Stroke, Aphasia, Broca", None, {"Vascular"}),                                # R5 + hyphen
+    ("Hyposmia", None, {"Other_neuro_symptom"}),
+    ("Prodromal Synucleinopathy, Hyposmia", None, {"Prodromal_PD"}),
+    ("Parkinsonism", None, {"Movement_disorder"}),                                      # R8
+    ("MCI, Amnestic, Multiple Domain, Parkinsonism", None, {"MCI", "Movement_disorder"}),
+    ("Dementia, Dementia with Lewy Bodies, Parkinsonism", None, {"Atypical_parkinsonism"}),
+    ("SWEDD", None, {"Movement_disorder"}),
+    ("Hyposmia, Restless Leg Syndrome", None, {"Movement_disorder"}),
+    ("Primary Progressive Aphasia", None, {"MCI"}),                                     # R7
+    ("Primary Progressive Aphasia, Semantic, FrontoTemporal Dementia", None, {"FTD"}),
+    ("Progressive Supranuclear Palsy", None, {"Atypical_parkinsonism"}),
+    ("MCI, Amnestic, Major Depressive Disorder", "Healthy", {"MCI", "Depression"}),    # R2
+    ("Major Depressive Disorder OR Medication-related OR Insomnia", None, {"Other_neuro_symptom"}),
+    ("Cognitively Normal", "Dysthymia", {"Depression"}),
+    ("Cognitively Normal", "Sleep Apnea, Insomnia", {"Sleep"}),
+    ("Cognitively Normal", "Schizophrenia, Hallucinations", {"Schizophrenia"}),
+    ("Cognitively Normal", "Hallucinations", {"Other_psych_symptom"}),
+    ("Cognitively Normal", "Major Depressive Disorder, Treated", {"Depression"}),
+    ("Cognitively Normal", "Other Psychiatric Disorder", {"Other_psych_disease"}),
+    ("LRRK2; GBA", "Unknown", {"Mutation_PD"}),                                         # R1
+    ("Unknown", "Undetermined", set()),
+    (None, None, set()),
+]
+
+
+@pytest.mark.parametrize("neuro, psych, expected", CLASSIFICATION_CASES)
+def test_proposed_classification_rules(neuro, psych, expected):
+    assert set(dc.scan_groups(neuro, psych)) == expected
+
+
+def test_terms_table_and_unmapped_terms():
+    terms = dc.load_terms()
+    assert terms["key"].is_unique
+    assert dc.term_info("  parkinsonism ")[0] == "MOVEMENT_SYNDROME"       # case and spaces ignored
+    flags, cn, unmapped = dc.classify_cell("Cognitively Normal, Made-up Disease")
+    assert cn and unmapped == ["Made-up Disease"] and not flags[dc.NEURO]
+    assert dc.rare_groups({"AD": 29, "MCI": 30, "Other_neuro_disease": 3, "Sleep": 0, "OCD": 2}) == \
+        {"AD": "Other_neuro_disease", "OCD": "Other_psych_disease"}
+
+
+def _tricky_diagnoses(split, source, df):
+    """Patients get the classification cases above, in turn."""
+    patients = df["healthy"] == 0
+    cases = CLASSIFICATION_CASES * (patients.sum() // len(CLASSIFICATION_CASES) + 1)
+    df.loc[patients, "neurological_diagnosis"] = [c[0] for c in cases[:patients.sum()]]
+    df.loc[patients, "psychiatric_diagnosis"] = [c[1] for c in cases[:patients.sum()]]
+    return df
+
+
+def test_inventory_correspondence_and_proposed_groups(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_tricky_diagnoses)
+    assert inv.main(["--pred-dir", str(d), "--out-dir", str(tmp_path / "o")]) == 0
+    corr = pd.read_csv(tmp_path / "o" / "inventory" / "diagnosis_correspondence.csv", keep_default_na=False)
+    assert {"term", "type", "group (proposed)", "condition", "scans test", "scans validation"} <= set(corr.columns)
+    assert (corr["type"] != "UNMAPPED").all()
+    assert corr.loc[(corr["term"] == "Parkinsonism"), "group (proposed)"].iloc[0] == "Movement_disorder"
+    groups = pd.read_csv(tmp_path / "o" / "inventory" / "diagnosis_groups_proposed.csv", keep_default_na=False)
+    raw = aio.native_scans(aio.read_all(d, TAG, []), [])
+    for split in aio.SPLITS:
+        r = raw[raw["_split"] == split]
+        expected = {}
+        for n, p in zip(r[aio.COL_NEURO_DX], r[aio.COL_PSYCH_DX]):
+            for g in dc.scan_groups(None if pd.isna(n) else n, None if pd.isna(p) else p):
+                expected[g] = expected.get(g, 0) + 1
+        got = dict(zip(groups["group"], groups[f"scans {split}"]))
+        for g, n in expected.items():
+            assert got[g] == n, (split, g)
+        no_group = np.array([not dc.scan_groups(None if pd.isna(n) else n, None if pd.isna(p) else p)
+                             for n, p in zip(r[aio.COL_NEURO_DX], r[aio.COL_PSYCH_DX])])
+        unclassified = int(((r["healthy"] == 0).to_numpy() & no_group).sum())
+        assert got[dc.UNCLASSIFIED] == unclassified
+
+
+@needs_r
+def test_r_proposed_groups_match_python(tmp_path):
+    (tmp_path / "pred").mkdir()
+    d = build_pred_dir(tmp_path / "pred", modify=_tricky_diagnoses)
+    res = _run_r(d, tmp_path / "o")
+    assert res.returncode == 0, res.stderr
+    scans = pd.read_csv(tmp_path / "o" / "scan_level.tsv", sep="\t", keep_default_na=False, na_values=["NA"])
+    group_cols = [c for c in scans.columns if c.startswith("group_")]
+    assert "group_Unclassified_patient" in group_cols
+    for _, row in scans.iterrows():
+        n = None if pd.isna(row["neurological_diagnosis"]) else row["neurological_diagnosis"]
+        p = None if pd.isna(row["psychiatric_diagnosis"]) else row["psychiatric_diagnosis"]
+        expected = set(dc.scan_groups(n, p))
+        got = {c[len("group_"):] for c in group_cols if row[c] in (True, "TRUE")} - {dc.UNCLASSIFIED}
+        assert got == expected, (n, p)
+        assert (row["group_Unclassified_patient"] in (True, "TRUE")) == (not expected and row["healthy"] == 0)
+    counts = pd.read_csv(tmp_path / "o" / "diagnosis_group_counts.tsv", sep="\t", keep_default_na=False)
+    for split in aio.SPLITS:
+        s = scans[scans["split"] == split]
+        for g in group_cols:
+            n = int((s[g].astype(str) == "TRUE").sum())
+            name = g[len("group_"):]
+            if n:
+                assert int(counts.loc[counts["group"] == name, f"scans_{split}"].iloc[0]) == n, (split, name)
+                merged = counts.loc[counts["group"] == name, f"merged_into_{split}"].iloc[0]
+                assert merged == (dc.rare_groups({name: n}).get(name, "")), (split, name)
