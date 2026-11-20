@@ -199,7 +199,9 @@ follow-up duration in two rows (all subjects with single session = 0; subjects w
 two sessions only). Sex: female/male in any case; a missing value is filled from the same
 participant's other scans when they agree. APOE: 0 = non-carrier, > 0 = carrier; -1, -1.0,
 `Unknown`, empty and NA = unknown. Scan level: status, age, proposed diagnosis groups (one row
-per group present; a scan can be in several), augmented samples per transform.
+per group present; a scan can be in several); below it, augmented samples by transform as n (% of
+the split's augmented samples), one row per augmented sample (`augmentation_counts.tsv` gives the
+same counts).
 `diagnosis_group_counts.tsv` gives scans, participants and healthy scans per proposed group and
 split, and the Other group a split merges it into (< 30 scans). `diagnosis_flag_counts.tsv`
 counts the flags of the old Figure 13 notebook (`n_positive`: all native scans of the split), with

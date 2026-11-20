@@ -9,7 +9,9 @@
 # Reads the prediction tables of ONE model (predictions_<split>_<tag>.tsv and
 # predictions_prediction-<split>_<tag>.tsv), keeps one row per scan (native original scan) and writes:
 #   demographics_table_split.docx        subject level, by split    (needs gtsummary + gt)
-#   demographics_table_split_scans.docx  scan level, by split       (needs gtsummary + gt)
+#   demographics_table_split_scans.docx  scan level, by split, and augmented samples by transform as
+#                                        n (% of the split's augmented samples)   (needs gtsummary + gt)
+#   augmentation_counts.tsv              augmented samples per split and transform (n, %)
 #   subject_level.tsv, scan_level.tsv    the data behind the two tables
 #   split_counts.tsv                     scans, participants and CN participants (healthy == 1) per split
 #   diagnosis_flag_counts.tsv            native scans per diagnosis flag and split, counted as the
@@ -375,6 +377,17 @@ prepare <- function(raw, terms) {
   per_scan <- samples %>% group_by(scan_key) %>%
     summarise(n_samples = n(), n_augmented = sum(augmented),
               across(starts_with("aug_"), sum), .groups = "drop")
+  # one row per augmented sample with its transform (one transform per augmented copy; a label
+  # naming several, or none, of the known transforms is shown as such)
+  hits <- as.matrix(samples[paste0("aug_", AUGMENTATION_TRANSFORMS)])
+  n_hits <- rowSums(hits)
+  transform <- ifelse(n_hits == 1, AUGMENTATION_TRANSFORMS[max.col(hits, ties.method = "first")],
+                      ifelse(n_hits > 1, "Several transforms", "Unrecognised"))
+  augmented_samples <- tibble(split = samples$split, transform = transform)[samples$augmented, ]
+  if (any(augmented_samples$transform == "Unrecognised")) warnings <- c(warnings, sprintf(
+    "'augmentation': %d augmented samples name none of %s: %s", sum(augmented_samples$transform == "Unrecognised"),
+    paste(AUGMENTATION_TRANSFORMS, collapse = "/"),
+    show(samples$augmentation[samples$augmented][augmented_samples$transform == "Unrecognised"])))
 
   scans <- native %>%
     mutate(healthy = healthy_num,
@@ -388,7 +401,8 @@ prepare <- function(raw, terms) {
   unmapped <- unique(unlist(str_split(scans$unmapped_terms[scans$unmapped_terms != ""], "; ")))
   if (length(unmapped)) warnings <- c(warnings, sprintf(
     "diagnosis terms not in diagnosis_terms.csv (no proposed group; add them to the table): %s", show(unmapped, 50)))
-  list(scans = scans, problems = problems, warnings = warnings, rows_read = nrow(raw), rows_distinct = nrow(rows))
+  list(scans = scans, augmented_samples = augmented_samples, problems = problems, warnings = warnings,
+       rows_read = nrow(raw), rows_distinct = nrow(rows))
 }
 
 subject_level <- function(scans) {
@@ -426,6 +440,20 @@ flag_counts <- function(scans) {
 # ---------------------------------------------------------------- tables (gtsummary)
 split_factor <- function(x) factor(x, levels = names(SPLIT_LABELS), labels = SPLIT_LABELS)
 
+TRANSFORM_LEVELS <- c(AUGMENTATION_TRANSFORMS, "Several transforms", "Unrecognised")
+
+# augmented samples per split and transform: n and % of the split's augmented samples
+augmentation_counts <- function(augmented_samples) {
+  augmented_samples %>%
+    mutate(transform = factor(transform, levels = TRANSFORM_LEVELS)) %>%
+    count(split, transform, name = "samples", .drop = FALSE) %>%
+    group_by(split) %>%
+    mutate(percent = if (sum(samples)) round(100 * samples / sum(samples), 1) else NA_real_) %>%
+    ungroup() %>%
+    filter(!(transform %in% c("Several transforms", "Unrecognised") & samples == 0)) %>%
+    arrange(match(split, names(SPLIT_LABELS)), transform)
+}
+
 relabel_missing <- function(tbl, variable_name, text) {
   # label of the missing-value row of one variable (gtsummary has one missing_text for all variables)
   tryCatch(gtsummary::modify_table_body(tbl, ~ dplyr::mutate(.x, label = dplyr::if_else(
@@ -433,7 +461,7 @@ relabel_missing <- function(tbl, variable_name, text) {
     error = function(e) tbl)
 }
 
-make_tables <- function(subjects, scans, out_dir) {
+make_tables <- function(subjects, scans, augmented_samples, out_dir) {
   if (!requireNamespace("gtsummary", quietly = TRUE) || !requireNamespace("gt", quietly = TRUE)) {
     message("gtsummary/gt not installed: .docx tables skipped (subject_level.tsv and scan_level.tsv written).")
     return(invisible(FALSE))
@@ -469,21 +497,37 @@ make_tables <- function(subjects, scans, out_dir) {
   present <- names(scans)[startsWith(names(scans), "group_")]
   present <- present[vapply(present, function(g) any(scans[[g]]), logical(1))]
   sc <- scans %>%
-    select(split, healthy, age, all_of(present), starts_with("aug_")) %>%
+    select(split, healthy, age, all_of(present)) %>%
     mutate(split = split_factor(split),
            healthy = factor(healthy, levels = c(0, 1), labels = c("Non-healthy", "Healthy"))) %>%
     rename_with(~ paste0("Diagnosis group: ", str_replace_all(str_remove(.x, "^group_"), "_", " ")),
-                starts_with("group_")) %>%
-    rename_with(~ str_replace(.x, "^aug_", "Augmented samples with "), starts_with("aug_"))
-  tbl_summary(
+                starts_with("group_"))
+  scan_tbl <- tbl_summary(
     sc, by = split, missing = "ifany", statistic = stat, digits = all_continuous() ~ 2,
-    type = list(age ~ "continuous", starts_with("Diagnosis group: ") ~ "dichotomous",
-                starts_with("Augmented samples") ~ "continuous"),
-    include = c(healthy, age, starts_with("Diagnosis group: "), starts_with("Augmented samples")),
+    type = list(age ~ "continuous", starts_with("Diagnosis group: ") ~ "dichotomous"),
+    include = c(healthy, age, starts_with("Diagnosis group: ")),
     label = list(healthy ~ "Status", age ~ "Age at session (years)")) %>%
-    add_overall() %>%
-    as_gt() %>%
-    gt::gtsave(filename = file.path(out_dir, "demographics_table_split_scans.docx"))
+    add_overall()
+
+  # augmented samples, one row per sample: n (% of the split's augmented samples) by transform
+  aug <- augmented_samples %>%
+    mutate(split = split_factor(split),
+           transform = droplevels(factor(transform, levels = TRANSFORM_LEVELS)))
+  aug_tbl <- tbl_summary(
+    aug, by = split, statistic = all_categorical() ~ "{n} ({p}%)", include = transform,
+    label = list(transform ~ "Transform (n, % of the split's augmented samples)")) %>%
+    add_overall()
+  same_splits <- setequal(as.character(unique(sc$split)), as.character(unique(aug$split)))
+  if (same_splits) {
+    tbl_stack(list(scan_tbl, aug_tbl), group_header = c("Native scans", "Augmented samples")) %>%
+      as_gt() %>%
+      gt::gtsave(filename = file.path(out_dir, "demographics_table_split_scans.docx"))
+  } else {
+    # a split without augmented samples: the two tables do not have the same columns
+    message("Some splits have no augmented samples: augmentation table written separately.")
+    scan_tbl %>% as_gt() %>% gt::gtsave(filename = file.path(out_dir, "demographics_table_split_scans.docx"))
+    aug_tbl %>% as_gt() %>% gt::gtsave(filename = file.path(out_dir, "demographics_table_split_augmentation.docx"))
+  }
   invisible(TRUE)
 }
 
@@ -546,6 +590,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   write_tsv(counts, file.path(out_dir, "diagnosis_flag_counts.tsv"))
   groups <- group_counts(scans, terms)
   write_tsv(groups, file.path(out_dir, "diagnosis_group_counts.tsv"))
+  aug_counts <- augmentation_counts(prep$augmented_samples)
+  write_tsv(aug_counts, file.path(out_dir, "augmentation_counts.tsv"))
 
   # one row per native scan here; participants = distinct database + subject_id
   per_split <- scans %>% group_by(split) %>%
@@ -561,13 +607,15 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     capture.output(print(as.data.frame(count(scans, split, sex_raw, sex_filled, sex)), row.names = FALSE)),
     "", "Every raw APOE value (native scans) and how it was coded:",
     capture.output(print(as.data.frame(count(scans, apoe_raw, apoe)), row.names = FALSE)), "",
+    "Augmented samples by transform (n, % of the split's augmented samples):",
+    capture.output(print(as.data.frame(aug_counts), row.names = FALSE)), "",
     "Proposed diagnosis groups (native scans; Other group if < 30 scans in a split):",
     capture.output(print(as.data.frame(groups), row.names = FALSE)), "",
     sprintf("ERROR: %s", prep$problems), sprintf("WARNING: %s", prep$warnings))
   writeLines(checks, file.path(out_dir, "demographics_checks.txt"))
   cat(checks, sep = "\n")
   print(as.data.frame(counts))
-  if (opts$tables) make_tables(subjects, scans, out_dir)
+  if (opts$tables) make_tables(subjects, scans, prep$augmented_samples, out_dir)
   invisible(0)
 }
 
