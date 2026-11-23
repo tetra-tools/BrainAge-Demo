@@ -180,10 +180,27 @@ scans of healthy participants and patients. Group from `healthy` at the first an
 (age order): stable healthy (1 → 1, never 0), converter (1 → 0), patient (0 → 0, never 1), other
 (any other sequence: counted, not plotted). Figure: (a–c) one line per participant, change in
 predicted age since the first scan vs years since the first scan, with the group mean curve and
-its 95% CI (drawn where at least `--min-n` participants contribute, default 5); (d) the three
-mean curves. Ages are whole years, so sessions within the same year share a time point.
-Outputs: figure (PDF + PNG), `brainage_followup_mean_curves.csv`, per-participant table with
-the rate of change, summary table per database and group, legend, `checks.md`.
+its 95% CI (drawn where at least `--min-n` participants contribute, default 10); (d) the three
+mean curves. Ages are whole years (floored), so sessions within the same year share a time point.
+
+Mixed models on every scan of the three groups (`statsmodels` MixedLM, random intercept and slope of
+time per participant, random intercept only if that does not converge):
+- rates: predicted age ~ t + group + group × t + baseline age × t + sex. The stable-healthy slope is
+  the model's own pace (predictions shrink towards the mean age); group × t = excess rates. No course
+  is anchored on its first scan, so the baseline noise does not regress to the mean;
+- healthy reference: each scan minus the change expected for a stable healthy participant of the same
+  baseline age (stable-healthy fixed effects);
+- conversion: converters aligned on their first patient session (conversion lies between the last
+  healthy and the first patient session); broken-stick model (stable healthy + converters) with a
+  change of slope at that session or at the midpoint of the interval; knot offset profiled by
+  maximum likelihood from −6 to +2 years. Each model is refitted with converters restricted to a
+  cognitive diagnosis at the first patient session (MCI, AD, dementia of unspecified cause, FTD).
+
+Outputs: figures `fig_brainage_followup` and `fig_brainage_followup_adjusted` (PDF + PNG),
+`brainage_followup_mean_curves.csv`, `_excess_curves.csv`, `_aligned_curves.csv`, per-participant
+table with the rate of change and the conversion interval, summary table per database and group,
+`brainage_followup_models.csv/.md` (coefficients), `brainage_followup_knot_profile.csv`, legends,
+`checks.md`.
 
 ### `demographics_tables.R`
 

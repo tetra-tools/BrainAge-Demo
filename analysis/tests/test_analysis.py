@@ -766,3 +766,62 @@ def test_r_proposed_groups_match_python(tmp_path):
                 assert int(counts.loc[counts["group"] == name, f"scans_{split}"].iloc[0]) == n, (split, name)
                 merged = counts.loc[counts["group"] == name, f"merged_into_{split}"].iloc[0]
                 assert merged == (dc.rare_groups({name: n}).get(name, "")), (split, name)
+
+
+def _synthetic_followup(seed=1):
+    """Courses with known rates: stable healthy 0.9; patients 0.9 + 0.3; converters 0.9 before their
+    first patient session and 0.9 + 1.0 after it."""
+    rng = np.random.default_rng(seed)
+    rows = []
+
+    def add(kind, n, times, rate_fn, status_fn, groups):
+        for i in range(n):
+            age0, a = float(rng.integers(60, 80)), rng.normal(0, 3)
+            k = int(rng.integers(2, len(times)))                   # converter: first patient session index
+            for s, t in enumerate(times):
+                rows.append({"_subject": f"oasis3/{kind}{i}", aio.COL_DATABASE: "oasis3", aio.COL_SESSION: f"ses-{s + 1}",
+                             "_ses_num": s + 1, "_age": age0 + t, "_t": float(t), "_healthy": status_fn(s, k),
+                             aio.COL_PRED: a + 0.9 * (age0 + t) + rate_fn(t, times[k]) + rng.normal(0, 1.5),
+                             "_sex": ["female", "male"][i % 2], "_groups": frozenset() if status_fn(s, k) else
+                             frozenset({"AD"} if i % 2 else {"Parkinson"})})
+    add("h", 200, [0, 2, 4, 6], lambda t, tdx: 0.0, lambda s, k: 1, None)
+    add("c", 90, [0, 2, 4, 6, 8], lambda t, tdx: 1.0 * max(0.0, t - tdx), lambda s, k: int(s < k), None)
+    add("p", 90, [0, 2, 4, 6], lambda t, tdx: 0.3 * t, lambda s, k: 0, None)
+    d = pd.DataFrame(rows)
+    d["_gap"] = d[aio.COL_PRED] - d["_age"]
+    d["_dpred"] = d[aio.COL_PRED] - d.groupby("_subject")[aio.COL_PRED].transform("first")
+    return d
+
+
+def test_followup_mixed_models_recover_known_rates():
+    d = _synthetic_followup()
+    part = fu.participant_table(d)
+    conv = part[part["group"] == "Converter"]
+    assert len(conv) == 90 and (conv["first patient session (years since first scan)"]
+                                > conv["last healthy session (years since first scan)"]).all()
+    assert conv["cognitive conversion"].sum() == 45                       # AD at the first patient session
+    notes = []
+    m = fu.model_data(d, part, notes)
+    coefs, prof, ref = fu.run_models(m, notes)
+    assert ref is not None
+
+    def est(model, definition, knot, term):
+        sel = coefs[(coefs["model"] == model) & (coefs["converters"] == definition) & (coefs["knot"] == knot)]
+        return sel.set_index("term")["estimate"][term]
+    assert est("rates", "all converters", "", "t") == pytest.approx(0.9, abs=0.1)
+    assert est("rates", "all converters", "", "pat:t") == pytest.approx(0.3, abs=0.12)
+    assert est("rates", "all converters", "", "conv:t") > 0.2
+    for definition in ("all converters", "cognitive converters"):
+        assert est("broken stick", definition, "first patient session", "conv:t") == pytest.approx(0.0, abs=0.2)
+        assert est("broken stick", definition, "first patient session", "post") == pytest.approx(1.0, abs=0.3)
+    off = "knot offset (years from first patient session)"
+    best = prof.loc[prof.groupby("converters")["log-likelihood (ML)"].idxmax()].set_index("converters")[off]
+    assert best["all converters"] == 0
+
+    m = fu.healthy_reference(m, ref)
+    assert m.loc[m["group"] == "Stable healthy", "_excess_change"].mean() == pytest.approx(0.0, abs=0.15)
+    aligned = fu.align_converters(m)
+    at_dx = aligned[(aligned["tau"] == 0) & (aligned["_healthy"] == 0)]
+    assert at_dx["_dresid"].abs().max() < 1e-9 and at_dx["_subject"].nunique() == 90
+    text = fu.models_markdown(coefs, prof, m)
+    assert "Broken stick, all converters, knot at first patient session" in text and "best knot +0 years" in text
