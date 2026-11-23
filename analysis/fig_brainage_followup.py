@@ -233,7 +233,7 @@ def make_figure(d: pd.DataFrame, part: pd.DataFrame, curves: pd.DataFrame, out_d
         base._letter(ax, letter, dy=16)
 
     # (d) mean curves together
-    ax_d.plot([0, t_max], [0, t_max], **identity, label="y = x (same pace as chronological age)")
+    ax_d.plot([0, t_max], [0, t_max], **identity, label="y = x")
     ax_d.axhline(0, ls=":", lw=0.7, color="#888888", zorder=1)
     for group in GROUPS:
         c = curves[curves["group"] == group]
