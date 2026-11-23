@@ -14,6 +14,24 @@ Chronological age is floored to whole years (as everywhere in the thesis), so fo
 intervals are in whole years and a participant whose sessions fall in the same year has no
 rate of change (counted in the table).
 
+Mixed models (all scans of the three groups, random intercept and slope of time per participant;
+random intercept only if that does not converge):
+
+* Rates: predicted age ~ t + group + group x t + baseline age x t + sex. The stable-healthy slope is
+  the model's own pace of ageing (below 1 because predictions shrink towards the mean age), so the
+  group x t terms are the excess rates of converters and patients. Fitting every scan with a
+  random intercept does not anchor a course on its first (noisy) scan: no regression to the mean
+  from the baseline.
+* Healthy reference: the stable-healthy fixed effects give each scan the change (and level)
+  expected for a stable healthy participant of the same baseline age and sex; the excess over it
+  is plotted.
+* Conversion: the date is only known to lie between the last healthy and the first patient
+  session. Converters are aligned on their first patient session, and a broken-stick model
+  (stable healthy + converters) adds a change of slope after a knot placed at that session or at
+  the midpoint of the interval; the knot offset is profiled by maximum likelihood (-6 to +2 years).
+  Every model is also fitted with converters restricted to a cognitive diagnosis at the first
+  patient session (MCI, AD, dementia of unspecified cause, FTD; diagnostic classification of the Methods).
+
 Outputs (in ``--out-dir``):
   fig_brainage_followup.pdf / .png  (a-c) one line per participant, by group: change in predicted age
                                     since the first scan vs years since the first scan, with the group
@@ -21,8 +39,15 @@ Outputs (in ``--out-dir``):
   brainage_followup_mean_curves.csv mean change in predicted age per year since the first scan
   brainage_followup_stats.csv/.md   per database and group: participants, sessions, follow-up,
                                     baseline age and gap, rate (median, IQR, mean with 95% CI)
-  brainage_followup_participants.csv one row per participant (group, sessions, rate)
-  brainage_followup_text.md         figure legend
+  brainage_followup_participants.csv one row per participant (group, sessions, rate, conversion)
+  fig_brainage_followup_adjusted.pdf / .png
+                                    (a) change in predicted age minus the change expected for a stable
+                                    healthy participant (mixed model), by group; (b) converters aligned on
+                                    their first patient session, with the broken-stick fit; (c) profile of
+                                    the knot offset
+  brainage_followup_models.csv/.md  mixed-model coefficients (rates, broken stick) and knot profile
+  brainage_followup_excess_curves.csv, brainage_followup_aligned_curves.csv
+  brainage_followup_text.md         figure legends
   checks.md                         data checks
 
 Example (from the repository root):
@@ -33,16 +58,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from matplotlib import patheffects
 from scipy import stats as st
+import statsmodels.formula.api as smf
 
 import analysis_io as aio
+import diagnosis_classification as dc
 import fig_brainage_scatter as base          # shared style (fonts, axes) and number formatting
+import fig_figure13_forest as f13            # sex coding shared with the forest plot
 
 plt = base.plt
 
@@ -51,7 +80,9 @@ OTHER = "Other"
 GROUP_COLORS = {"Stable healthy": "#0072B2", "Converter": "#E69F00", "Patient": "#CC79A7"}
 N_BOOT = 1000
 SEED = 2026
-MIN_N = 5            # mean curve drawn at a time point only if at least MIN_N participants contribute
+MIN_N = 10           # mean curve drawn at a time point only if at least MIN_N participants contribute
+COGNITIVE_GROUPS = ("MCI", "AD", "Dementia_unspecified", "FTD")   # cognitive conversion
+KNOT_OFFSETS = tuple(range(-6, 3))   # knot offsets profiled, years from the first patient session
 
 
 # =============================================================================
@@ -76,6 +107,8 @@ def load_followup(pred_dir: Path, model_tag: str, split: str, strict: bool, note
         notes.append(f"WARNING: {n0 - len(d):,} scans without numeric prediction/age or healthy 0/1 not used.")
     d["_age"] = np.floor(d[aio.COL_AGE])
     d["_gap"] = d[aio.COL_PRED] - d["_age"]
+    d["_sex"] = f13.fill_sex(d, notes)
+    d["_groups"] = [dc.scan_groups(n, p) for n, p in zip(d[aio.COL_NEURO_DX], d[aio.COL_PSYCH_DX])]
     d["_subject"] = aio.subject_key(d)
     d["_healthy"] = d[aio.COL_HEALTHY].astype(int)
     # sessions in the same (floored) year are ordered by the number in session_id ("ses-2" before "ses-10")
@@ -108,13 +141,24 @@ def participant_table(d: pd.DataFrame) -> pd.DataFrame:
             group = OTHER                                   # patient -> healthy -> patient
         ages, preds = g["_age"].to_numpy(float), g[aio.COL_PRED].to_numpy(float)
         rate = np.polyfit(ages, preds, 1)[0] if np.unique(ages).size > 1 else np.nan
-        conv_age = ages[np.argmax(status == 0)] if group == "Converter" else np.nan
+        conv_age = t_dx = t_lh = np.nan
+        conv_groups = ""
+        if group == "Converter":
+            i_dx = int(np.argmax(status == 0))
+            conv_age, t_dx = ages[i_dx], ages[i_dx] - ages[0]
+            t_lh = ages[i_dx - 1] - ages[0]                 # last healthy session before it
+            conv_groups = ", ".join(sorted(g["_groups"].iloc[i_dx]))
         rows.append({
             "participant": subject, "database": g[aio.COL_DATABASE].iloc[0], "group": group,
             "sessions": g[aio.COL_SESSION].nunique(), "scans": len(g),
             "baseline age": ages[0], "last age": ages[-1], "follow-up (years)": ages[-1] - ages[0],
             "baseline gap": g["_gap"].iloc[0], "last gap": g["_gap"].iloc[-1],
             "rate (predicted years per year)": rate, "age at first patient session": conv_age,
+            "first patient session (years since first scan)": t_dx,
+            "last healthy session (years since first scan)": t_lh,
+            "groups at first patient session": conv_groups,
+            "cognitive conversion": bool(set(conv_groups.split(", ")) & set(COGNITIVE_GROUPS)),
+            "sex": g["_sex"].dropna().iloc[0] if g["_sex"].notna().any() else np.nan,
             "status sequence": "".join("H" if s == 1 else "P" for s in status),
         })
     return pd.DataFrame(rows)
@@ -178,6 +222,183 @@ def mean_curves(d: pd.DataFrame, part: pd.DataFrame, min_n: int) -> pd.DataFrame
                      "ci95_high": v.mean() + half, "mean change in brain-age gap": v.mean() - t,
                      "drawn (n >= min-n)": n >= min_n})
     return pd.DataFrame(rows)
+
+
+def curves_by(df: pd.DataFrame, x: str, value: str, min_n: int) -> pd.DataFrame:
+    """Mean of `value` per group and whole-year `x` (one value per participant and year), 95% t-interval."""
+    per = df.groupby(["group", "_subject", x], as_index=False)[value].mean()
+    rows = []
+    for (group, xv), g in per.groupby(["group", x]):
+        v = g[value].to_numpy(float)
+        n = len(v)
+        half = st.t.ppf(0.975, n - 1) * v.std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
+        rows.append({"group": group, "x": int(xv), "participants": n, "mean": v.mean(),
+                     "ci95_low": v.mean() - half, "ci95_high": v.mean() + half, "drawn": n >= min_n})
+    return pd.DataFrame(rows, columns=["group", "x", "participants", "mean", "ci95_low", "ci95_high", "drawn"])
+
+
+# =============================================================================
+# Mixed models
+# =============================================================================
+TERM_LABELS = {
+    "Intercept": "Stable healthy, first scan, mean baseline age, female (years)",
+    "t": "Stable healthy: rate (predicted years per year, mean baseline age)",
+    "conv": "Converter - stable healthy at the first scan (years)",
+    "pat": "Patient - stable healthy at the first scan (years)",
+    "conv:t": "Converter - stable healthy: rate difference",
+    "pat:t": "Patient - stable healthy: rate difference",
+    "age0c": "Per year of baseline age, at the first scan (years)",
+    "age0c:t": "Rate change per year of baseline age",
+    "sex_male": "Male - female (years)",
+    "post": "Converter: change of rate after the knot",
+    "conv:t + post": "Converter - stable healthy: rate difference after the knot",
+}
+KEY_TERMS = {"rates": ["t", "conv:t", "pat:t", "age0c:t"], "broken stick": ["t", "conv:t", "post", "conv:t + post"]}
+
+
+def model_data(d: pd.DataFrame, part: pd.DataFrame, notes: List[str]) -> pd.DataFrame:
+    """Scans of the plotted groups with the covariates of the mixed models (baseline age centred)."""
+    info = part.set_index("participant")
+    m = d[d["_subject"].map(info["group"]).isin(GROUPS)].copy()
+    no_sex = m["_sex"].isna()
+    if no_sex.any():
+        notes.append(f"Mixed models: {int(no_sex.sum()):,} scans without sex not modelled "
+                     f"({m.loc[no_sex, '_subject'].nunique():,} participants).")
+        m = m[~no_sex].copy()
+    for col, src in (("group", "group"), ("t_dx", "first patient session (years since first scan)"),
+                     ("t_lh", "last healthy session (years since first scan)"), ("cognitive", "cognitive conversion")):
+        m[col] = m["_subject"].map(info[src])
+    base_age = m.groupby("_subject")["_age"].first()
+    m.attrs["age centre"] = float(base_age.mean())
+    m["age0c"] = m["_subject"].map(base_age) - m.attrs["age centre"]
+    m["pred"], m["t"] = m[aio.COL_PRED].astype(float), m["_t"].astype(float)
+    m["sex_male"] = (m["_sex"] == "male").astype(float)
+    m["conv"] = (m["group"] == "Converter").astype(float)
+    m["pat"] = (m["group"] == "Patient").astype(float)
+    return m
+
+
+def fit_mixed(data: pd.DataFrame, formula: str, notes: List[str], label: str, reml: bool = True):
+    """Random intercept and slope of t per participant, else random intercept only. (result, structure)."""
+    for re_formula, name in (("~t", "intercept + slope"), ("1", "intercept")):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res = smf.mixedlm(formula, data, groups=data["_subject"], re_formula=re_formula).fit(
+                    reml=reml, method=["lbfgs", "powell"])
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            notes.append(f"{label}: random {name} model failed ({exc}).")
+            continue
+        if res.converged and np.isfinite(res.bse_fe).all():
+            return res, name
+        notes.append(f"{label}: random {name} model did not converge.")
+    return None, None
+
+
+def subset(m: pd.DataFrame, definition: str) -> pd.DataFrame:
+    """All converters, or converters with a cognitive diagnosis at the first patient session only."""
+    return m if definition == "all converters" else m[(m["conv"] == 0) | (m["cognitive"] == True)]  # noqa: E712
+
+
+def rate_formula(data: pd.DataFrame) -> str:
+    terms = ["t", "age0c", "age0c:t", "sex_male"]
+    for g in ("conv", "pat"):
+        if data[g].any():
+            terms += [g, f"{g}:t"]
+    return "pred ~ " + " + ".join(terms)
+
+
+def with_knot(data: pd.DataFrame, knot: pd.Series) -> pd.DataFrame:
+    """Stable healthy + converters, `post` = years after the converter's knot (0 before it, 0 for healthy)."""
+    data = data[data["group"].isin(["Stable healthy", "Converter"])].copy()
+    data["post"] = np.where(data["conv"] == 1, np.clip(data["t"] - knot.loc[data.index], 0, None), 0.0)
+    return data
+
+
+def identifiable(data: pd.DataFrame) -> bool:
+    """Converters must have time before and after the knot, else conv:t and post are confounded."""
+    c = data[data["conv"] == 1]
+    return bool(((c["post"] == 0) & (c["t"] > 0)).any() and (c["post"] > 0).any())
+
+
+BROKEN_STICK = "pred ~ t + conv + conv:t + post + age0c + age0c:t + sex_male"
+
+
+def coef_rows(res, model: str, definition: str, knot: str, data: pd.DataFrame, structure: str) -> List[dict]:
+    fe, ci, cov = res.fe_params, res.conf_int(), res.cov_params()
+    est = {k: (fe[k], ci.loc[k, 0], ci.loc[k, 1], res.pvalues[k]) for k in fe.index}
+    if "post" in fe.index:                                    # rate difference after the knot
+        e = fe["conv:t"] + fe["post"]
+        se = np.sqrt(cov.loc["conv:t", "conv:t"] + cov.loc["post", "post"] + 2 * cov.loc["conv:t", "post"])
+        est["conv:t + post"] = (e, e - 1.96 * se, e + 1.96 * se, 2 * st.norm.sf(abs(e / se)))
+    n_part = data.groupby("group")["_subject"].nunique()
+    return [{"model": model, "converters": definition, "knot": knot, "term": k, "label": TERM_LABELS.get(k, k),
+             "estimate": v[0], "ci95_low": v[1], "ci95_high": v[2], "p": v[3],
+             "participants": int(data["_subject"].nunique()), "scans": len(data),
+             "converters (participants)": int(n_part.get("Converter", 0)),
+             "random effects": structure, "baseline age centre": data.attrs.get("age centre", np.nan)}
+            for k, v in est.items()]
+
+
+def healthy_reference(m: pd.DataFrame, res) -> pd.DataFrame:
+    """Change and level expected for a stable healthy participant of the same baseline age and sex."""
+    fe = res.fe_params
+    rate = fe["t"] + fe["age0c:t"] * m["age0c"]
+    m = m.copy()
+    m["_excess_change"] = m["_dpred"] - rate * m["t"]
+    m["_resid_healthy"] = m["pred"] - (fe["Intercept"] + fe["age0c"] * m["age0c"]
+                                       + fe["sex_male"] * m["sex_male"] + rate * m["t"])
+    return m
+
+
+def align_converters(m: pd.DataFrame) -> pd.DataFrame:
+    """Converters on the time of their first patient session (tau = 0), residuals relative to that scan."""
+    c = m[m["group"] == "Converter"].copy()
+    c["tau"] = c["t"] - c["t_dx"]
+    at_dx = c[c["_healthy"] == 0].groupby("_subject")["_resid_healthy"].first()   # first patient scan
+    c["_dresid"] = c["_resid_healthy"] - c["_subject"].map(at_dx)
+    return c
+
+
+def run_models(m: pd.DataFrame, notes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[object]]:
+    """Rate models and broken-stick models for both converter definitions; knot profile."""
+    rows, prof, ref = [], [], None
+    for definition in ("all converters", "cognitive converters"):
+        data = subset(m, definition)
+        if definition != "all converters" and not data["conv"].any():
+            notes.append("Mixed models: no converter with a cognitive diagnosis at the first patient session.")
+            continue
+        res, structure = fit_mixed(data, rate_formula(data), notes, f"Rates ({definition})")
+        if res is not None:
+            rows += coef_rows(res, "rates", definition, "", data, structure)
+            ref = res if definition == "all converters" else ref
+        conv = data[data["conv"] == 1]
+        if conv.empty:
+            continue
+        knots = {"first patient session": data["t_dx"], "midpoint (last healthy, first patient)":
+                 (data["t_lh"] + data["t_dx"]) / 2}
+        for knot_name, knot in knots.items():
+            kd = with_knot(data, knot)
+            if not identifiable(kd):
+                notes.append(f"Broken stick ({definition}, {knot_name}): no converter time on both sides of the knot.")
+                continue
+            res_k, structure_k = fit_mixed(kd, BROKEN_STICK, notes, f"Broken stick ({definition}, {knot_name})")
+            if res_k is not None:
+                rows += coef_rows(res_k, "broken stick", definition, knot_name, kd, structure_k)
+        for offset in KNOT_OFFSETS:                               # maximum likelihood (comparable fits)
+            kd = with_knot(data, data["t_dx"] + offset)
+            ll = np.nan
+            if identifiable(kd):
+                res_o, _ = fit_mixed(kd, BROKEN_STICK, [], "", reml=False)
+                ll = res_o.llf if res_o is not None else np.nan
+            prof.append({"converters": definition, "knot offset (years from first patient session)": offset,
+                         "log-likelihood (ML)": ll})
+    prof = pd.DataFrame(prof)
+    if len(prof):
+        best = prof.groupby("converters")["log-likelihood (ML)"].transform("max")
+        prof["likelihood ratio vs best"] = 2 * (best - prof["log-likelihood (ML)"])
+        prof["within 95% (LR <= 3.84)"] = prof["likelihood ratio vs best"] <= st.chi2.ppf(0.95, 1)
+    return pd.DataFrame(rows), prof, ref
 
 
 # =============================================================================
@@ -251,6 +472,94 @@ def make_figure(d: pd.DataFrame, part: pd.DataFrame, curves: pd.DataFrame, out_d
     fig.savefig(png, dpi=300)
     plt.close(fig)
     return pdf, png
+
+
+def _curve(ax, c: pd.DataFrame, color: str, lw: float = 2.0, label=None):
+    c = c[c["drawn"].astype(bool)].sort_values("x")
+    if c.empty:
+        return
+    ax.fill_between(c["x"], c["ci95_low"], c["ci95_high"], color=color, alpha=0.22, linewidth=0, zorder=3)
+    ax.plot(c["x"], c["mean"], color=color, lw=lw, zorder=4, label=label,
+            path_effects=[patheffects.withStroke(linewidth=lw + 1.6, foreground="white")])
+
+
+def make_adjusted_figure(excess: pd.DataFrame, aligned: pd.DataFrame, aligned_curves: pd.DataFrame,
+                         coefs: pd.DataFrame, prof: pd.DataFrame, part: pd.DataFrame, out_dir: Path):
+    cm = 1 / 2.54
+    fig = plt.figure(figsize=(16 * cm, 13.5 * cm), layout="constrained")
+    gs = fig.add_gridspec(2, 3, height_ratios=[0.9, 1.0])
+    ax_a, ax_b, ax_c = fig.add_subplot(gs[0, :]), fig.add_subplot(gs[1, :2]), fig.add_subplot(gs[1, 2])
+    zero = dict(ls="--", lw=0.9, color=base.COLORS["identity"], zorder=1)
+
+    ax_a.axhline(0, **zero, label="Stable healthy expectation")
+    for group in GROUPS:
+        n = int((part["group"] == group).sum())
+        _curve(ax_a, excess[excess["group"] == group], GROUP_COLORS[group], lw=2.2, label=f"{group} (n = {n:,})")
+    ax_a.set_xlabel("Years since first scan", fontsize=base.FS["label"] - 1)
+    ax_a.set_ylabel("Excess change in predicted\nbrain age (years, 95% CI)", fontsize=base.FS["label"] - 1)
+    ax_a.legend(loc="upper left", frameon=False, fontsize=base.FS["legend"])
+    base._style(ax_a)
+    base._letter(ax_a, "a")
+
+    color = GROUP_COLORS["Converter"]
+    for _, t in aligned.sort_values(["_subject", "tau", "_ses_num"], kind="stable").groupby("_subject", sort=False):
+        ax_b.plot(t["tau"], t["_dresid"], color=color, lw=0.6, alpha=0.3, zorder=2)
+    ax_b.axvline(0, ls=":", lw=0.8, color="#555555", zorder=1)
+    ax_b.axhline(0, ls=":", lw=0.7, color="#888888", zorder=1)
+    _curve(ax_b, aligned_curves, color, lw=2.2, label="Mean (95% CI)")
+    k = coefs[(coefs["model"] == "broken stick") & (coefs["converters"] == "all converters")
+              & (coefs["knot"] == "first patient session")].set_index("term")["estimate"]
+    if {"conv:t", "post"} <= set(k.index) and len(aligned):
+        lo, hi = float(aligned["tau"].min()), float(aligned["tau"].max())
+        ax_b.plot([lo, 0, hi], [k["conv:t"] * lo, 0, (k["conv:t"] + k["post"]) * hi], color="black", lw=1.2,
+                  ls="--", zorder=5, label="Broken-stick fit")
+    n = int((part["group"] == "Converter").sum())
+    base._inset(ax_b, f"n = {n:,} converters")
+    ax_b.set_xlabel("Years from the first patient session", fontsize=base.FS["label"] - 1)
+    ax_b.set_ylabel("Excess over stable healthy, from\nthe first patient scan (years)", fontsize=base.FS["label"] - 1)
+    if ax_b.get_legend_handles_labels()[0]:
+        ax_b.legend(loc="lower right", frameon=False, fontsize=base.FS["legend"])
+    base._style(ax_b)
+    base._letter(ax_b, "b")
+
+    off = "knot offset (years from first patient session)"
+    for definition, style in (("all converters", "-"), ("cognitive converters", "--")):
+        p = prof[prof["converters"] == definition] if len(prof) else prof
+        if len(p):
+            ax_c.plot(p[off], p["likelihood ratio vs best"], ls=style, marker="o", ms=3, color=color, label=definition)
+    ax_c.axhline(st.chi2.ppf(0.95, 1), ls=":", lw=0.8, color="#555555")
+    ax_c.set_xticks(list(KNOT_OFFSETS)[::2])
+    ax_c.set_xlabel("Knot (years from the\nfirst patient session)", fontsize=base.FS["label"] - 1)
+    ax_c.set_ylabel("Likelihood ratio vs best knot", fontsize=base.FS["label"] - 1)
+    if ax_c.get_legend_handles_labels()[0]:
+        ax_c.legend(loc="upper center", frameon=False, fontsize=base.FS["legend"] - 1)
+    base._style(ax_c)
+    base._letter(ax_c, "c")
+
+    pdf, png = out_dir / "fig_brainage_followup_adjusted.pdf", out_dir / "fig_brainage_followup_adjusted.png"
+    fig.savefig(pdf)
+    fig.savefig(png, dpi=300)
+    plt.close(fig)
+    return pdf, png
+
+
+def adjusted_legend_text(min_n: int) -> str:
+    return (
+        "Figure X - Longitudinal course of predicted brain age relative to stable healthy participants "
+        "(external validation set, native scans). Linear mixed model on every scan of the stable healthy "
+        "participants, converters and patients: predicted age ~ years since the first scan, group, group x time, "
+        "baseline age x time and sex, with a random intercept and slope per participant. (a) Change in predicted "
+        "brain age since the first scan minus the change expected for a stable healthy participant of the same "
+        "baseline age (stable-healthy fixed effects), group mean at each whole year with its 95% confidence "
+        f"interval, drawn where at least {min_n} participants contribute; the dashed line is the stable-healthy "
+        "expectation. (b) Converters aligned on their first patient session (year 0; conversion lies between the "
+        "last healthy and the first patient session): predicted brain age minus the stable-healthy expectation, "
+        "relative to the first patient scan; thin lines are participants, the thick line the mean (95% CI) and the "
+        "dashed line the broken-stick mixed model with a change of slope at the first patient session. (c) "
+        "Likelihood ratio of the broken-stick model as the knot moves from 6 years before to 2 years after the "
+        "first patient session, for all converters and for converters with a cognitive diagnosis (MCI, AD, "
+        "dementia of unspecified cause, FTD); the dotted line is the 95% threshold (3.84). Chronological age in "
+        "whole years, floored.\n")
 
 
 def legend_text(part: pd.DataFrame, dbs_with_followup: List[str], dbs_without: List[str], min_n: int) -> str:
@@ -359,16 +668,71 @@ def main(argv=None) -> int:
     curves = mean_curves(long_d, part, args.min_n)
     curves.to_csv(out / "brainage_followup_mean_curves.csv", index=False)
     pdf, png = make_figure(long_d, part, curves, out)
-    (out / "brainage_followup_text.md").write_text(
-        "## Figure legend\n\n" + legend_text(part, dbs_with, dbs_without, args.min_n))
+    legends = "## Figure legend\n\n" + legend_text(part, dbs_with, dbs_without, args.min_n)
+
+    # mixed models, healthy reference and conversion
+    m = model_data(long_d, part, notes)
+    coefs, prof, ref = run_models(m, notes)
+    coefs.to_csv(out / "brainage_followup_models.csv", index=False)
+    if len(prof):
+        prof.to_csv(out / "brainage_followup_knot_profile.csv", index=False)
+    figures = [pdf, png]
+    if ref is not None:
+        m = healthy_reference(m, ref)
+        excess = curves_by(m, "_t", "_excess_change", args.min_n)
+        aligned = align_converters(m)
+        aligned_curves = curves_by(aligned, "tau", "_dresid", args.min_n)
+        excess.rename(columns={"x": "years since first scan"}).to_csv(out / "brainage_followup_excess_curves.csv",
+                                                                       index=False)
+        aligned_curves.rename(columns={"x": "years from first patient session"}).to_csv(
+            out / "brainage_followup_aligned_curves.csv", index=False)
+        figures += make_adjusted_figure(excess, aligned, aligned_curves, coefs, prof, part, out)
+        legends += "\n## Adjusted figure legend\n\n" + adjusted_legend_text(args.min_n)
+    else:
+        notes.append("WARNING: the rate model did not converge; no healthy reference and no adjusted figure.")
+    (out / "brainage_followup_models.md").write_text(models_markdown(coefs, prof, m))
+    (out / "brainage_followup_text.md").write_text(legends)
     (out / "checks.md").write_text("# Data checks\n\n" + "\n".join(f"- {n}" for n in notes) + "\n")
 
-    print(f"Figure : {pdf}\n         {png}")
-    for name in ("brainage_followup_stats.md", "brainage_followup_mean_curves.csv",
+    print("Figure : " + "\n         ".join(str(f) for f in figures))
+    for name in ("brainage_followup_stats.md", "brainage_followup_models.md", "brainage_followup_mean_curves.csv",
                  "brainage_followup_participants.csv", "brainage_followup_text.md", "checks.md"):
         print(f"Output : {out / name}")
     print("\n" + md[cols].to_string(index=False))
     return 0
+
+
+def models_markdown(coefs: pd.DataFrame, prof: pd.DataFrame, m: pd.DataFrame) -> str:
+    def p_txt(p):
+        return "< 0.001" if p < 0.001 else f"{p:.3f}"
+    out = ["# Longitudinal mixed models (external validation, participants with at least two sessions)\n",
+           "Predicted age (years) on every scan; t = years since the first scan (floored ages); baseline age "
+           f"centred on {base._fmt(m.attrs.get('age centre', np.nan), 1)} years; reference = stable healthy, "
+           "female. Wald 95% CI. Rates in predicted years per chronological year.\n"]
+    if coefs.empty:
+        return "\n".join(out + ["No model could be fitted.\n"])
+    for (model, definition, knot), g in coefs.groupby(["model", "converters", "knot"], sort=False):
+        g = g[g["term"].isin(KEY_TERMS[model])]
+        head = f"## {model.capitalize()}, {definition}" + (f", knot at {knot}" if knot else "")
+        meta = (f"{g['participants'].iloc[0]:,} participants ({g['converters (participants)'].iloc[0]:,} converters), "
+                f"{g['scans'].iloc[0]:,} scans; random {g['random effects'].iloc[0]}.")
+        table = pd.DataFrame({"term": g["label"],
+                              "estimate (95% CI)": [f"{base._fmt(e, 2)} ({base._range(a, b, 2)})" for e, a, b
+                                                    in zip(g["estimate"], g["ci95_low"], g["ci95_high"])],
+                              "p": [p_txt(p) for p in g["p"]]})
+        out += [head + "\n", meta + "\n", aio.markdown_table(table) + "\n"]
+    fitted = prof.dropna(subset=["log-likelihood (ML)"]) if len(prof) else prof
+    if len(fitted):
+        best = fitted.loc[fitted.groupby("converters")["log-likelihood (ML)"].idxmax()]
+        lines = []
+        for _, b in best.iterrows():
+            ok = prof[(prof["converters"] == b["converters"]) & prof["within 95% (LR <= 3.84)"]]
+            off = "knot offset (years from first patient session)"
+            lines.append(f"- {b['converters']}: best knot {int(b[off]):+d} years from the first patient session "
+                         f"(offsets within the 95% likelihood interval: {int(ok[off].min()):+d} to "
+                         f"{int(ok[off].max()):+d}).")
+        out += ["## Knot profile (maximum likelihood, broken-stick model)\n", "\n".join(lines) + "\n"]
+    return "\n".join(out)
 
 
 if __name__ == "__main__":
