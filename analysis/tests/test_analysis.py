@@ -825,3 +825,20 @@ def test_followup_mixed_models_recover_known_rates():
     assert at_dx["_dresid"].abs().max() < 1e-9 and at_dx["_subject"].nunique() == 90
     text = fu.models_markdown(coefs, prof, m)
     assert "Broken stick, all converters, knot at first patient session" in text and "best knot +0 years" in text
+
+
+def test_followup_knot_profile_uses_one_random_structure():
+    d = _synthetic_followup()
+    part = fu.participant_table(d)
+    notes = []
+    m = fu.model_data(d, part, notes)
+    _, prof, _ = fu.run_models(m, notes, min_n=10)
+    off = "knot offset (years from first patient session)"
+    for definition, p in prof.groupby("converters"):
+        fitted = p[p["log-likelihood (ML)"].notna()]
+        assert fitted["random effects"].nunique() == 1, definition
+        # offsets with too few converters on both sides of the knot are not fitted
+        assert (p.loc[p["log-likelihood (ML)"].isna(), "converters with scans on both sides"] < 10).all()
+        assert (fitted["converters with scans on both sides"] >= 10).all()
+    assert prof.loc[prof["converters"] == "all converters"].set_index(off).loc[-6, "log-likelihood (ML)"] != \
+        prof.loc[prof["converters"] == "all converters"].set_index(off).loc[0, "log-likelihood (ML)"]
