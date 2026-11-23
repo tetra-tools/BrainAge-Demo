@@ -278,9 +278,13 @@ def model_data(d: pd.DataFrame, part: pd.DataFrame, notes: List[str]) -> pd.Data
     return m
 
 
-def fit_mixed(data: pd.DataFrame, formula: str, notes: List[str], label: str, reml: bool = True):
+STRUCTURES = (("~t", "intercept + slope"), ("1", "intercept"))
+
+
+def fit_mixed(data: pd.DataFrame, formula: str, notes: List[str], label: str, reml: bool = True,
+              structures=STRUCTURES):
     """Random intercept and slope of t per participant, else random intercept only. (result, structure)."""
-    for re_formula, name in (("~t", "intercept + slope"), ("1", "intercept")):
+    for re_formula, name in structures:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -319,6 +323,43 @@ def identifiable(data: pd.DataFrame) -> bool:
     """Converters must have time before and after the knot, else conv:t and post are confounded."""
     c = data[data["conv"] == 1]
     return bool(((c["post"] == 0) & (c["t"] > 0)).any() and (c["post"] > 0).any())
+
+
+def both_sides(data: pd.DataFrame) -> int:
+    """Converters with a scan after their first scan but before the knot and a scan after the knot."""
+    c = data[data["conv"] == 1]
+    before = c[(c["post"] == 0) & (c["t"] > 0)].groupby("_subject").size()
+    after = c[c["post"] > 0].groupby("_subject").size()
+    return len(before.index.intersection(after.index))
+
+
+def knot_profile(data: pd.DataFrame, definition: str, notes: List[str], min_n: int) -> List[dict]:
+    """Maximum-likelihood fits of the broken stick with the knot moved, all with ONE random-effects structure
+    (likelihoods of different structures are not comparable). Offsets where fewer than `min_n` converters
+    have scans on both sides of the knot are not fitted."""
+    off_col = "knot offset (years from first patient session)"
+    cases = []
+    for offset in KNOT_OFFSETS:
+        kd = with_knot(data, data["t_dx"] + offset)
+        cases.append((offset, kd, both_sides(kd)))
+    fitted = [(o, kd) for o, kd, n in cases if n >= min_n]
+    lls, used = {}, None
+    for structure in STRUCTURES:
+        lls = {}
+        for offset, kd in fitted:
+            res, _ = fit_mixed(kd, BROKEN_STICK, [], "", reml=False, structures=(structure,))
+            lls[offset] = res.llf if res is not None else np.nan
+        if all(np.isfinite(v) for v in lls.values()):
+            used = structure[1]
+            break
+        failed = [o for o, v in lls.items() if not np.isfinite(v)]
+        notes.append(f"Knot profile ({definition}): random {structure[1]} model did not converge at offsets "
+                     f"{', '.join(f'{o:+d}' for o in failed)}; whole profile refitted with the next structure.")
+    if used is None:
+        notes.append(f"Knot profile ({definition}): no random-effects structure converged at every offset.")
+    return [{"converters": definition, off_col: o, "converters with scans on both sides": n,
+             "log-likelihood (ML)": lls.get(o, np.nan) if used else np.nan, "random effects": used or ""}
+            for o, kd, n in cases]
 
 
 BROKEN_STICK = "pred ~ t + conv + conv:t + post + age0c + age0c:t + sex_male"
@@ -360,7 +401,7 @@ def align_converters(m: pd.DataFrame) -> pd.DataFrame:
     return c
 
 
-def run_models(m: pd.DataFrame, notes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[object]]:
+def run_models(m: pd.DataFrame, notes: List[str], min_n: int = MIN_N) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[object]]:
     """Rate models and broken-stick models for both converter definitions; knot profile."""
     rows, prof, ref = [], [], None
     for definition in ("all converters", "cognitive converters"):
@@ -385,14 +426,7 @@ def run_models(m: pd.DataFrame, notes: List[str]) -> Tuple[pd.DataFrame, pd.Data
             res_k, structure_k = fit_mixed(kd, BROKEN_STICK, notes, f"Broken stick ({definition}, {knot_name})")
             if res_k is not None:
                 rows += coef_rows(res_k, "broken stick", definition, knot_name, kd, structure_k)
-        for offset in KNOT_OFFSETS:                               # maximum likelihood (comparable fits)
-            kd = with_knot(data, data["t_dx"] + offset)
-            ll = np.nan
-            if identifiable(kd):
-                res_o, _ = fit_mixed(kd, BROKEN_STICK, [], "", reml=False)
-                ll = res_o.llf if res_o is not None else np.nan
-            prof.append({"converters": definition, "knot offset (years from first patient session)": offset,
-                         "log-likelihood (ML)": ll})
+        prof += knot_profile(data, definition, notes, min_n)
     prof = pd.DataFrame(prof)
     if len(prof):
         best = prof.groupby("converters")["log-likelihood (ML)"].transform("max")
@@ -672,7 +706,7 @@ def main(argv=None) -> int:
 
     # mixed models, healthy reference and conversion
     m = model_data(long_d, part, notes)
-    coefs, prof, ref = run_models(m, notes)
+    coefs, prof, ref = run_models(m, notes, args.min_n)
     coefs.to_csv(out / "brainage_followup_models.csv", index=False)
     if len(prof):
         prof.to_csv(out / "brainage_followup_knot_profile.csv", index=False)
@@ -728,10 +762,14 @@ def models_markdown(coefs: pd.DataFrame, prof: pd.DataFrame, m: pd.DataFrame) ->
         for _, b in best.iterrows():
             ok = prof[(prof["converters"] == b["converters"]) & prof["within 95% (LR <= 3.84)"]]
             off = "knot offset (years from first patient session)"
+            sel = prof[(prof["converters"] == b["converters"]) & prof["log-likelihood (ML)"].notna()]
             lines.append(f"- {b['converters']}: best knot {int(b[off]):+d} years from the first patient session "
                          f"(offsets within the 95% likelihood interval: {int(ok[off].min()):+d} to "
-                         f"{int(ok[off].max()):+d}).")
-        out += ["## Knot profile (maximum likelihood, broken-stick model)\n", "\n".join(lines) + "\n"]
+                         f"{int(ok[off].max()):+d}; offsets fitted {int(sel[off].min()):+d} to {int(sel[off].max()):+d}; "
+                         f"random {b['random effects']} at every offset).")
+        out += ["## Knot profile (maximum likelihood, broken-stick model)\n",
+                "Offsets with fewer converters with scans on both sides of the knot than the curve threshold are "
+                "not fitted.\n", "\n".join(lines) + "\n"]
     return "\n".join(out)
 
 
