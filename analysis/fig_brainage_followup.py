@@ -313,9 +313,13 @@ def rate_formula(data: pd.DataFrame) -> str:
 
 
 def with_knot(data: pd.DataFrame, knot: pd.Series) -> pd.DataFrame:
-    """Stable healthy + converters, `post` = years after the converter's knot (0 before it, 0 for healthy)."""
+    """Stable healthy + converters, `post` = years after the converter's knot (0 before it, 0 for healthy).
+    A knot before the first scan is set to the first scan: otherwise `post` is already positive at the first
+    scan and ties the converter's level at the first scan to its knot (a between-participant term)."""
     data = data[data["group"].isin(["Stable healthy", "Converter"])].copy()
-    data["post"] = np.where(data["conv"] == 1, np.clip(data["t"] - knot.loc[data.index], 0, None), 0.0)
+    k = knot.loc[data.index].clip(lower=0)
+    data["post"] = np.where(data["conv"] == 1, np.clip(data["t"] - k, 0, None), 0.0)
+    data["_knot_clipped"] = (data["conv"] == 1) & (knot.loc[data.index] < 0)
     return data
 
 
@@ -333,33 +337,72 @@ def both_sides(data: pd.DataFrame) -> int:
     return len(before.index.intersection(after.index))
 
 
+def fit_ml(kd: pd.DataFrame, re_formula: str, starts=()):
+    """Best converged maximum-likelihood fit of the broken stick over optimizers and start values
+    (L-BFGS and BFGS; Powell only if neither converges)."""
+    model = smf.mixedlm(BROKEN_STICK, kd, groups=kd["_subject"], re_formula=re_formula)
+    best = None
+    for methods in (("lbfgs", "bfgs"), ("powell",)):
+        for start in [None, *[s for s in starts if s is not None]]:
+            for method in methods:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        res = model.fit(reml=False, method=method, start_params=start)
+                except (ValueError, np.linalg.LinAlgError):
+                    continue
+                if res.converged and np.isfinite(res.llf) and np.isfinite(res.bse_fe).all() \
+                        and (best is None or res.llf > best.llf):
+                    best = res
+        if best is not None:
+            break
+    return best
+
+
 def knot_profile(data: pd.DataFrame, definition: str, notes: List[str], min_n: int) -> List[dict]:
     """Maximum-likelihood fits of the broken stick with the knot moved, all with ONE random-effects structure
-    (likelihoods of different structures are not comparable). Offsets where fewer than `min_n` converters
-    have scans on both sides of the knot are not fitted."""
+    (likelihoods of different structures are not comparable). Each offset keeps the best fit over two
+    optimizers, a cold start and warm starts from the neighbouring offsets (sweeps in both directions): the
+    likelihood of one offset can only rise when a better optimum is found. Offsets where fewer than `min_n`
+    converters have scans on both sides of the knot are not fitted."""
     off_col = "knot offset (years from first patient session)"
-    cases = []
+    cases = {}
     for offset in KNOT_OFFSETS:
         kd = with_knot(data, data["t_dx"] + offset)
-        cases.append((offset, kd, both_sides(kd)))
-    fitted = [(o, kd) for o, kd, n in cases if n >= min_n]
-    lls, used = {}, None
-    for structure in STRUCTURES:
-        lls = {}
-        for offset, kd in fitted:
-            res, _ = fit_mixed(kd, BROKEN_STICK, [], "", reml=False, structures=(structure,))
-            lls[offset] = res.llf if res is not None else np.nan
-        if all(np.isfinite(v) for v in lls.values()):
-            used = structure[1]
+        cases[offset] = (kd, both_sides(kd))
+    fitted = [o for o in KNOT_OFFSETS if cases[o][1] >= min_n]
+    best, used = {}, None
+    for re_formula, name in STRUCTURES:
+        best = {o: fit_ml(cases[o][0], re_formula) for o in fitted}
+        for order in (fitted, fitted[::-1]):                  # warm starts from the previous offset
+            prev = None
+            for o in order:
+                start = prev.params_object if prev is not None else None
+                res = fit_ml(cases[o][0], re_formula, starts=(start,)) if start is not None else None
+                if res is not None and (best[o] is None or res.llf > best[o].llf):
+                    best[o] = res
+                prev = best[o] if best[o] is not None else prev
+        if all(r is not None for r in best.values()):
+            used = name
             break
-        failed = [o for o, v in lls.items() if not np.isfinite(v)]
-        notes.append(f"Knot profile ({definition}): random {structure[1]} model did not converge at offsets "
+        failed = [o for o, r in best.items() if r is None]
+        notes.append(f"Knot profile ({definition}): random {name} model did not converge at offsets "
                      f"{', '.join(f'{o:+d}' for o in failed)}; whole profile refitted with the next structure.")
     if used is None:
         notes.append(f"Knot profile ({definition}): no random-effects structure converged at every offset.")
-    return [{"converters": definition, off_col: o, "converters with scans on both sides": n,
-             "log-likelihood (ML)": lls.get(o, np.nan) if used else np.nan, "random effects": used or ""}
-            for o, kd, n in cases]
+    rows = []
+    for o in KNOT_OFFSETS:
+        kd, n = cases[o]
+        res = best.get(o) if used else None
+        slope_sd = (float(np.sqrt(res.cov_re.loc["t", "t"])) if res is not None and "t" in res.cov_re.index
+                    else np.nan)
+        rows.append({"converters": definition, off_col: o, "converters with scans on both sides": n,
+                     "converters with the knot set to the first scan":
+                         int(kd.loc[kd["_knot_clipped"], "_subject"].nunique()),
+                     "log-likelihood (ML)": res.llf if res is not None else np.nan,
+                     "post (change of rate after the knot)": res.fe_params["post"] if res is not None else np.nan,
+                     "random slope SD": slope_sd, "random effects": used or ""})
+    return rows
 
 
 BROKEN_STICK = "pred ~ t + conv + conv:t + post + age0c + age0c:t + sex_male"
@@ -544,7 +587,9 @@ def make_adjusted_figure(excess: pd.DataFrame, aligned: pd.DataFrame, aligned_cu
     k = coefs[(coefs["model"] == "broken stick") & (coefs["converters"] == "all converters")
               & (coefs["knot"] == "first patient session")].set_index("term")["estimate"]
     if {"conv:t", "post"} <= set(k.index) and len(aligned):
-        lo, hi = float(aligned["tau"].min()), float(aligned["tau"].max())
+        drawn = aligned_curves[aligned_curves["drawn"].astype(bool)]["x"]      # no extrapolation beyond the mean
+        lo, hi = (float(drawn.min()), float(drawn.max())) if len(drawn) else (float(aligned["tau"].min()),
+                                                                             float(aligned["tau"].max()))
         ax_b.plot([lo, 0, hi], [k["conv:t"] * lo, 0, (k["conv:t"] + k["post"]) * hi], color="black", lw=1.2,
                   ls="--", zorder=5, label="Broken-stick fit")
     n = int((part["group"] == "Converter").sum())

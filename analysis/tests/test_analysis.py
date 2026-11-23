@@ -842,3 +842,14 @@ def test_followup_knot_profile_uses_one_random_structure():
         assert (fitted["converters with scans on both sides"] >= 10).all()
     assert prof.loc[prof["converters"] == "all converters"].set_index(off).loc[-6, "log-likelihood (ML)"] != \
         prof.loc[prof["converters"] == "all converters"].set_index(off).loc[0, "log-likelihood (ML)"]
+
+
+def test_followup_knot_before_first_scan_is_set_to_first_scan():
+    d = _synthetic_followup()
+    part = fu.participant_table(d)
+    m = fu.model_data(d, part, [])
+    kd = fu.with_knot(m, m["t_dx"] - 20)                    # every knot long before the first scan
+    conv = kd[kd["conv"] == 1]
+    assert (conv.loc[conv["t"] == 0, "post"] == 0).all()     # no level at the first scan from the knot
+    assert np.allclose(conv["post"], conv["t"])
+    assert conv["_knot_clipped"].all()
